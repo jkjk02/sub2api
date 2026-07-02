@@ -161,10 +161,21 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
-	// OAuth + mimic Claude Code：强制注入 CLI 指纹相关 header
-	// （user-agent/x-stainless-*/x-app/Accept/x-stainless-helper-method/x-client-request-id）
-	if tokenType == "oauth" && mimicClaudeCode {
+	// OAuth + mimic Claude Code: 强制注入 CLI 指纹相关 header
+	// 非 OAuth (API Key) + cli_mode: 若配置允许则也注入 CLI 特征 headers
+	shouldInjectCLIHeaders := (tokenType == "oauth" && mimicClaudeCode) ||
+		(tokenType != "oauth" && mimicClaudeCode &&
+			s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
+	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
+	}
+
+	// 对于开启 cli_mode 的非 OAuth 账号：若配置了自定义 CLI User-Agent，覆盖默认值
+	if tokenType != "oauth" && mimicClaudeCode {
+		if customUA := account.GetCLIUserAgent(); customUA != "" {
+			setHeaderRaw(req.Header, "User-Agent", customUA)
+		}
 	}
 
 	// 写入最终 anthropic-beta header
