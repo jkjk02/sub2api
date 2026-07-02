@@ -380,6 +380,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
 		lastWireBody = wireBody
 
+		// 请求间延迟：模拟真人打字节奏，降低自动化检测风险（仅首次尝试，重试跳过）。
+		if attempt == 1 && (shouldMimicClaudeCode || shouldSimulateCLIForAPIKey) {
+			s.applyInterRequestDelay()
+		}
+
 		// 发送请求
 		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
 		if err != nil {
