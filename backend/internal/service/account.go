@@ -1693,19 +1693,27 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 }
 
 // IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装
-// 仅适用于 Anthropic OAuth/SetupToken 类型账号
+// 适用于 Anthropic OAuth/SetupToken 类型账号，以及开启 cli_mode 的 API Key 账号
 // 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征
 func (a *Account) IsTLSFingerprintEnabled() bool {
-	// 仅支持 Anthropic OAuth/SetupToken 账号
-	if !a.IsAnthropicOAuthOrSetupToken() {
+	// 支持 Anthropic OAuth/SetupToken 账号
+	if a.IsAnthropicOAuthOrSetupToken() {
+		if a.Extra == nil {
+			return false
+		}
+		if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+			if enabled, ok := v.(bool); ok {
+				return enabled
+			}
+		}
 		return false
 	}
-	if a.Extra == nil {
-		return false
-	}
-	if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
-		if enabled, ok := v.(bool); ok {
-			return enabled
+	// 支持开启 cli_mode 的 API Key 账号
+	if a.IsAPIKeyOrBedrock() && a.IsCliMode() {
+		if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+			if enabled, ok := v.(bool); ok {
+				return enabled
+			}
 		}
 	}
 	return false
@@ -1734,6 +1742,34 @@ func (a *Account) GetTLSFingerprintProfileID() int64 {
 		}
 	}
 	return 0
+}
+
+// IsCliMode 检查账号是否启用 CLI 模拟模式
+// 对于非 OAuth 账号（如 API Key），启用后将在上游转发时注入 Claude Code CLI 特征
+func (a *Account) IsCliMode() bool {
+	if a.Extra == nil {
+		return false
+	}
+	if v, ok := a.Extra["cli_mode"]; ok {
+		if enabled, ok := v.(bool); ok {
+			return enabled
+		}
+	}
+	return false
+}
+
+// GetCLIUserAgent 获取账号配置的自定义 CLI User-Agent
+// 返回空字符串表示未配置（使用 claude.DefaultHeaders 中的默认 UA）
+func (a *Account) GetCLIUserAgent() string {
+	if a.Extra == nil {
+		return ""
+	}
+	if v, ok := a.Extra["cli_user_agent"]; ok {
+		if ua, ok := v.(string); ok {
+			return ua
+		}
+	}
+	return ""
 }
 
 // GetUserMsgQueueMode 获取用户消息队列模式

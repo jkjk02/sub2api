@@ -806,6 +806,21 @@ type GatewayConfig struct {
 	// UserMessageQueue: 用户消息串行队列配置
 	// 对 role:"user" 的真实用户消息实施账号级串行化 + RPM 自适应延迟
 	UserMessageQueue UserMessageQueueConfig `mapstructure:"user_message_queue"`
+
+	// CliSimulation: CLI 模拟配置，用于非 OAuth 账号（如 API Key）开启 Claude Code CLI 特征注入
+	CliSimulation CliSimulationConfig `mapstructure:"cli_simulation"`
+}
+
+// CliSimulationConfig CLI 模拟配置。
+// 用于允许 API Key 等非 OAuth 账号在上游转发时注入 Claude Code CLI 特征
+// (User-Agent, x-stainless-*, x-app, anthropic-beta 等)，与已有 OAuth mimicry 对齐。
+type CliSimulationConfig struct {
+	// Enabled: 全局开关，控制是否允许非 OAuth 账号启用 CLI 模拟
+	Enabled bool `mapstructure:"enabled"`
+	// ForceCLIBetaForAPIKey: 即使客户端未携带 anthropic-beta，是否强制写入 APIKeyBetaHeader
+	ForceCLIBetaForAPIKey bool `mapstructure:"force_cli_beta_for_apikey"`
+	// EnableCCMimicHeadersForAPIKey: 是否对 API Key 账号也注入 Claude Code mimic headers
+	EnableCCMimicHeadersForAPIKey bool `mapstructure:"enable_cc_mimic_headers_for_apikey"`
 }
 
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。

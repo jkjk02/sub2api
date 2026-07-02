@@ -4960,6 +4960,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	isClaudeCode := IsClaudeCodeClient(ctx) || isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
 
+	// 对于开启了 cli_mode 的非 OAuth 账号（API Key），允许注入 CLI 特征 headers，
+	// 但不执行 OAuth 特定的 body 改写（system prompt 注入、metadata 注入等）。
+	shouldSimulateCLIForAPIKey := account.IsCliMode() &&
+		s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled
+
 	if shouldMimicClaudeCode {
 		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
 		// 风格的 system prompt）。原因：第三方工具（opencode 等）会发 "You are Claude
@@ -5136,7 +5141,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
-		upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+		upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode || shouldSimulateCLIForAPIKey)
 		releaseUpstreamCtx()
 		if err != nil {
 			return nil, err
@@ -6936,10 +6941,21 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
-	// OAuth + mimic Claude Code：强制注入 CLI 指纹相关 header
-	// （user-agent/x-stainless-*/x-app/Accept/x-stainless-helper-method/x-client-request-id）
-	if tokenType == "oauth" && mimicClaudeCode {
+	// OAuth + mimic Claude Code: 强制注入 CLI 指纹相关 header
+	// 非 OAuth (API Key) + cli_mode: 若配置允许则也注入 CLI 特征 headers
+	shouldInjectCLIHeaders := (tokenType == "oauth" && mimicClaudeCode) ||
+		(tokenType != "oauth" && mimicClaudeCode &&
+			s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
+	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
+	}
+
+	// 对于开启 cli_mode 的非 OAuth 账号：若配置了自定义 CLI User-Agent，覆盖默认值
+	if tokenType != "oauth" && mimicClaudeCode {
+		if customUA := account.GetCLIUserAgent(); customUA != "" {
+			setHeaderRaw(req.Header, "User-Agent", customUA)
+		}
 	}
 
 	// 写入最终 anthropic-beta header
