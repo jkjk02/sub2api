@@ -832,6 +832,10 @@ type CliSimulationConfig struct {
 	FingerprintSaltOverride string `mapstructure:"fingerprint_salt_override"`
 	// TLSProfilePoolSize: TLS 指纹 profile 池大小，>1 时启用随机选择（对 cli_mode 账户随机选取 TLS profile）
 	TLSProfilePoolSize int `mapstructure:"tls_profile_pool_size"`
+	// MinInterRequestDelayMs: 模拟真人打字节奏的最小请求间延迟（毫秒），0 表示不启用
+	MinInterRequestDelayMs int `mapstructure:"min_inter_request_delay_ms"`
+	// MaxInterRequestDelayMs: 最大请求间延迟（毫秒），0 表示不启用
+	MaxInterRequestDelayMs int `mapstructure:"max_inter_request_delay_ms"`
 }
 
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。

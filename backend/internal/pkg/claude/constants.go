@@ -2,6 +2,7 @@
 package claude
 
 import (
+	"runtime"
 	"sync/atomic"
 )
 
@@ -134,6 +135,11 @@ var DefaultHeaders = map[string]string{
 	"X-Stainless-Timeout":                       "600",
 	"X-App":                                     "cli",
 	"Anthropic-Dangerous-Direct-Browser-Access": "true",
+}
+
+func init() {
+	DefaultHeaders["X-Stainless-OS"] = runtime.GOOS
+	DefaultHeaders["X-Stainless-Arch"] = runtime.GOARCH
 }
 
 // Model 表示一个 Claude 模型
