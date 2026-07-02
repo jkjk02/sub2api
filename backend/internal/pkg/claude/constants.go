@@ -1,6 +1,10 @@
 // Package claude provides constants and helpers for Claude API integration.
 package claude
 
+import (
+	"sync/atomic"
+)
+
 // Claude Code 客户端相关常量
 
 // Beta header 常量
@@ -59,13 +63,39 @@ const APIKeyHaikuBetaHeader = BetaInterleavedThinking
 
 // DefaultCacheControlTTL 是网关代理为自己生成的 cache_control 块默认使用的 ttl。
 // 真实 Claude Code CLI 当前使用 "1h"，但本仓策略是"客户端透传 ttl 优先；
-// 客户端缺省时统一使用 5m"，这样既不浪费 1h 缓存额度，也保留客户端自定义能力。
-const DefaultCacheControlTTL = "5m"
+// 客户端缺省时统一使用 5m"。可通过 gateway.cli_simulation.cache_control_ttl_override 覆盖。
+var DefaultCacheControlTTL = "5m"
+
+// SetCacheControlTTL 设置默认 cache_control TTL（用于配置覆盖）
+func SetCacheControlTTL(s string) {
+	if s != "" {
+		DefaultCacheControlTTL = s
+	}
+}
 
 // CLICurrentVersion 是 sub2api 当前对外伪装的 Claude Code CLI 版本号（三段 semver）。
 // 用于 billing attribution block 中的 cc_version=X.Y.Z.{fp} 前缀以及 fingerprint 计算。
 // 必须与 DefaultHeaders["User-Agent"] 中的版本号严格一致；不一致会被 Anthropic 判第三方。
 const CLICurrentVersion = "2.1.161"
+
+// syncedVersion holds the dynamically synced CC version (from npm registry).
+// Empty means not synced — fall back to CLICurrentVersion.
+var syncedVersion atomic.Value // string
+
+// SetSyncedCLIVersion sets the dynamically synced version.
+func SetSyncedCLIVersion(v string) {
+	if v != "" {
+		syncedVersion.Store(v)
+	}
+}
+
+// GetSyncedCLIVersion returns the dynamically synced version, or empty if not set.
+func GetSyncedCLIVersion() string {
+	if v, ok := syncedVersion.Load().(string); ok {
+		return v
+	}
+	return ""
+}
 
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
 // 用于 OAuth 账号伪装成 Claude Code 时使用。
