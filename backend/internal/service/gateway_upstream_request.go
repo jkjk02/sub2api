@@ -509,7 +509,8 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		if mimicClaudeCode {
 			// mimic 路径跳过白名单透传，incomingBeta 始终为空；所有模型都必须
 			// 携带完整 Claude Code beta 集合，避免 Haiku 被识别为第三方客户端。
-			return mergeAnthropicBetaDropping(claude.FullClaudeCodeMimicryBetas(), "", effectiveDropSet), true
+			requiredBetas := s.mergeExtraBetaTokens(claude.FullClaudeCodeMimicryBetas())
+			return mergeAnthropicBetaDropping(requiredBetas, "", effectiveDropSet), true
 		}
 		// 真 Claude Code 客户端透传路径
 		return stripBetaTokensWithSet(s.getBetaHeader(modelID, clientBeta), effectiveDropSet), true
@@ -527,6 +528,40 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		}
 	}
 	return "", false
+}
+
+// mergeExtraBetaTokens 合并配置文件 gateway.cli_simulation.extra_beta_tokens 中的额外 beta token
+func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
+	if s.cfg == nil || len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
+	result := make([]string, 0, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
+	for _, token := range base {
+		if _, ok := seen[token]; !ok {
+			seen[token] = struct{}{}
+			result = append(result, token)
+		}
+	}
+	for _, token := range s.cfg.Gateway.CliSimulation.ExtraBetaTokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; !ok {
+			seen[token] = struct{}{}
+			result = append(result, token)
+		}
+	}
+	return result
+}
+
+// getEffectiveCacheControlTTL returns the configured cache_control TTL override.
+func (s *GatewayService) getEffectiveCacheControlTTL() string {
+	if s.cfg != nil && s.cfg.Gateway.CliSimulation.CacheControlTTLOverride != "" {
+		return s.cfg.Gateway.CliSimulation.CacheControlTTLOverride
+	}
+	return claude.DefaultCacheControlTTL
 }
 
 // computeFinalCountTokensAnthropicBeta 是 count_tokens 路径上 anthropic-beta header 的
@@ -559,6 +594,7 @@ func (s *GatewayService) computeFinalCountTokensAnthropicBeta(
 			// incomingBeta = req.Header[anthropic-beta] = 客户端透传过来的 client beta。
 			// 重构后直接从 clientHeaders 拿同一个值，保持行为一致。
 			requiredBetas := append(claude.FullClaudeCodeMimicryBetas(), claude.BetaTokenCounting)
+			requiredBetas = s.mergeExtraBetaTokens(requiredBetas)
 			return mergeAnthropicBetaDropping(requiredBetas, clientBeta, effectiveDropSet), true
 		}
 		if clientBeta == "" {

@@ -338,15 +338,8 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 		userID = generateClientID()
 	}
 
-	// session_id 用"会话级稳定种子"派生（账号 + 客户端区分因子 + 首条 user 文本）：
-	// 随对话在尾部追加 messages 时保持不变，贴近真实 CC 进程级稳定的 session_id。
-	// 不复用 GenerateSessionHash —— 后者是粘性路由键、按设计逐轮变化（见其测试）。
-	var firstUserText string
-	if parsed.Body != nil {
-		firstUserText = extractFirstUserText(parsed.Body.Bytes())
-	}
-	seed := buildStableSessionSeed(account.ID, sessionContextDiscriminator(parsed.SessionContext), firstUserText)
-	sessionID := generateSessionUUID(seed)
+	// session_id 使用真随机 UUID（真实 Claude Code 使用进程级随机 UUID）
+	sessionID := uuid.NewString()
 
 	// 根据指纹 UA 版本选择输出格式
 	var uaVersion string
@@ -462,14 +455,7 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 		userID = generateClientID()
 	}
 
-	// 与 buildOAuthMetadataUserID 一致：用会话级稳定种子，避免整 body 哈希导致
-	// 每轮（甚至每个 token 变化）都重算出不同的 session_id。
-	var clientDiscriminator string
-	if fp != nil {
-		clientDiscriminator = fp.ClientID
-	}
-	seed := buildStableSessionSeed(account.ID, clientDiscriminator, extractFirstUserText(body))
-	sessionID := generateSessionUUID(seed)
+	sessionID := uuid.NewString()
 
 	var uaVersion string
 	if fp != nil {
