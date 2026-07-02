@@ -171,8 +171,15 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		applyClaudeCodeMimicHeaders(req, reqStream)
 	}
 
-	// 对于开启 cli_mode 的非 OAuth 账号：若配置了自定义 CLI User-Agent，覆盖默认值
-	if tokenType != "oauth" && mimicClaudeCode {
+	// 若配置了版本覆盖或远程同步了最新版本，更新 User-Agent 中的版本号。
+	if mimicClaudeCode {
+		effectiveVersion := s.GetEffectiveCLIVersion()
+		if effectiveVersion != claude.CLICurrentVersion {
+			currentUA := getHeaderRaw(req.Header, "User-Agent")
+			newUA := strings.Replace(currentUA, "claude-cli/"+claude.CLICurrentVersion, "claude-cli/"+effectiveVersion, 1)
+			setHeaderRaw(req.Header, "User-Agent", newUA)
+		}
+		// 账户级自定义 UA 拥有最终优先级。
 		if customUA := account.GetCLIUserAgent(); customUA != "" {
 			setHeaderRaw(req.Header, "User-Agent", customUA)
 		}
