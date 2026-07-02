@@ -1375,15 +1375,8 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 		userID = generateClientID()
 	}
 
-	// session_id 用"会话级稳定种子"派生（账号 + 客户端区分因子 + 首条 user 文本）：
-	// 随对话在尾部追加 messages 时保持不变，贴近真实 CC 进程级稳定的 session_id。
-	// 不复用 GenerateSessionHash —— 后者是粘性路由键、按设计逐轮变化（见其测试）。
-	var firstUserText string
-	if parsed.Body != nil {
-		firstUserText = extractFirstUserText(parsed.Body.Bytes())
-	}
-	seed := buildStableSessionSeed(account.ID, sessionContextDiscriminator(parsed.SessionContext), firstUserText)
-	sessionID := generateSessionUUID(seed)
+	// session_id 使用真随机 UUID（真实 Claude Code 使用进程级随机 UUID）
+	sessionID := uuid.NewString()
 
 	// 根据指纹 UA 版本选择输出格式
 	var uaVersion string
@@ -1499,14 +1492,7 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 		userID = generateClientID()
 	}
 
-	// 与 buildOAuthMetadataUserID 一致：用会话级稳定种子，避免整 body 哈希导致
-	// 每轮（甚至每个 token 变化）都重算出不同的 session_id。
-	var clientDiscriminator string
-	if fp != nil {
-		clientDiscriminator = fp.ClientID
-	}
-	seed := buildStableSessionSeed(account.ID, clientDiscriminator, extractFirstUserText(body))
-	sessionID := generateSessionUUID(seed)
+	sessionID := uuid.NewString()
 
 	var uaVersion string
 	if fp != nil {
@@ -4972,19 +4958,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// 检测到"有 CC prompt 但无 billing block"的不一致而判为 third-party。
 		// Parrot 的 transform_request 从不检查客户端 system 内容，直接覆盖。
 		systemRewritten := false
-		if !strings.Contains(strings.ToLower(reqModel), "haiku") {
-			systemRaw, _ := parsed.SystemValue()
-			systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
-			if systemPromptInjectionEnabled {
-				if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
-					return nil, err
-				}
-				systemRewritten = true
+		systemRaw, _ := parsed.SystemValue()
+		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
+		if systemPromptInjectionEnabled {
+			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
+				return nil, err
 			}
+			systemRewritten = true
 		}
 
 		// system 被重写时保留 CC prompt 的 cache_control: ephemeral（匹配真实 Claude Code 行为）；
-		// 未重写时（haiku / 注入开关关闭）剥离客户端 cache_control，与原有行为一致。
+		// 未重写时（注入开关关闭）剥离客户端 cache_control，与原有行为一致。
 		// 两种情况下 enforceCacheControlLimit 都会兜底处理上限。
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: !systemRewritten}
 		if s.identityService != nil {
@@ -7289,6 +7273,7 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 			if !strings.Contains(strings.ToLower(modelID), "haiku") {
 				requiredBetas = claude.FullClaudeCodeMimicryBetas()
 			}
+			requiredBetas = s.mergeExtraBetaTokens(requiredBetas)
 			return mergeAnthropicBetaDropping(requiredBetas, "", effectiveDropSet), true
 		}
 		// 真 Claude Code 客户端透传路径
@@ -7307,6 +7292,41 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		}
 	}
 	return "", false
+}
+
+// mergeExtraBetaTokens 合并配置文件 gateway.cli_simulation.extra_beta_tokens 中的额外 beta token
+func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
+	if s.cfg == nil || len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
+	result := make([]string, 0, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
+	for _, t := range base {
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			result = append(result, t)
+		}
+	}
+	for _, t := range s.cfg.Gateway.CliSimulation.ExtraBetaTokens {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// getEffectiveCacheControlTTL returns the effective cache_control TTL
+// (config override or claude.DefaultCacheControlTTL)
+func (s *GatewayService) getEffectiveCacheControlTTL() string {
+	if s.cfg != nil && s.cfg.Gateway.CliSimulation.CacheControlTTLOverride != "" {
+		return s.cfg.Gateway.CliSimulation.CacheControlTTLOverride
+	}
+	return claude.DefaultCacheControlTTL
 }
 
 // computeFinalCountTokensAnthropicBeta 是 count_tokens 路径上 anthropic-beta header 的
@@ -7339,6 +7359,7 @@ func (s *GatewayService) computeFinalCountTokensAnthropicBeta(
 			// incomingBeta = req.Header[anthropic-beta] = 客户端透传过来的 client beta。
 			// 重构后直接从 clientHeaders 拿同一个值，保持行为一致。
 			requiredBetas := append(claude.FullClaudeCodeMimicryBetas(), claude.BetaTokenCounting)
+			requiredBetas = s.mergeExtraBetaTokens(requiredBetas)
 			return mergeAnthropicBetaDropping(requiredBetas, clientBeta, effectiveDropSet), true
 		}
 		if clientBeta == "" {

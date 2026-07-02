@@ -821,6 +821,17 @@ type CliSimulationConfig struct {
 	ForceCLIBetaForAPIKey bool `mapstructure:"force_cli_beta_for_apikey"`
 	// EnableCCMimicHeadersForAPIKey: 是否对 API Key 账号也注入 Claude Code mimic headers
 	EnableCCMimicHeadersForAPIKey bool `mapstructure:"enable_cc_mimic_headers_for_apikey"`
+
+	// CCVersionOverride: 覆盖 Claude Code 版本号 (空则使用 claude.CLICurrentVersion)
+	CCVersionOverride string `mapstructure:"cc_version_override"`
+	// ExtraBetaTokens: 追加到 anthropic-beta 的额外 token 列表
+	ExtraBetaTokens []string `mapstructure:"extra_beta_tokens"`
+	// CacheControlTTLOverride: 覆盖默认 cache_control TTL (空则使用 claude.DefaultCacheControlTTL)
+	CacheControlTTLOverride string `mapstructure:"cache_control_ttl_override"`
+	// FingerprintSaltOverride: 覆盖 billing attribution 指纹 salt (空则使用内置默认值)
+	FingerprintSaltOverride string `mapstructure:"fingerprint_salt_override"`
+	// TLSProfilePoolSize: TLS 指纹 profile 池大小，>1 时启用随机选择（对 cli_mode 账户随机选取 TLS profile）
+	TLSProfilePoolSize int `mapstructure:"tls_profile_pool_size"`
 }
 
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。
