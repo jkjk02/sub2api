@@ -836,6 +836,16 @@ type CliSimulationConfig struct {
 	MinInterRequestDelayMs int `mapstructure:"min_inter_request_delay_ms"`
 	// MaxInterRequestDelayMs: 最大请求间延迟（毫秒），0 表示不启用
 	MaxInterRequestDelayMs int `mapstructure:"max_inter_request_delay_ms"`
+	// CCVersionPool: CC 版本号池，非空时每个账号从池中随机分配一个版本（模拟不同用户的升级时间差）
+	CCVersionPool []string `mapstructure:"cc_version_pool"`
+	// OSArchPool: OS/Arch 组合池，非空时每个账号随机分配一组（模拟不同用户的操作系统）
+	OSArchPool []OSArchEntry `mapstructure:"os_arch_pool"`
+}
+
+// OSArchEntry represents an OS/Arch diversity entry for CLI simulation.
+type OSArchEntry struct {
+	OS   string `mapstructure:"os"`
+	Arch string `mapstructure:"arch"`
 }
 
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。

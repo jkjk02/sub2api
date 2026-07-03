@@ -6938,11 +6938,26 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
+		// OS/Arch 多样性：若账号配置了 cli_os / cli_arch，覆盖默认值
+		// （模拟不同用户使用不同操作系统的自然分布）
+		if osv := account.GetCLIOS(); osv != "" {
+			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osv)
+		}
+		if arch := account.GetCLIArch(); arch != "" {
+			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
+		}
 	}
 
 	// 若配置了版本覆盖或远程同步了最新版本，更新 User-Agent 中的版本号
 	if mimicClaudeCode {
 		effectiveVersion := s.GetEffectiveCLIVersion()
+		// 版本池多样性：若账号未分配池版本，从配置池中随机选取并存入 account extra
+		if poolV := account.GetCCPoolVersion(); poolV != "" {
+			effectiveVersion = poolV
+		} else if s.cfg != nil && len(s.cfg.Gateway.CliSimulation.CCVersionPool) > 0 {
+			poolV := s.cfg.Gateway.CliSimulation.CCVersionPool[mathrand.Intn(len(s.cfg.Gateway.CliSimulation.CCVersionPool))]
+			effectiveVersion = poolV
+		}
 		if effectiveVersion != claude.CLICurrentVersion {
 			currentUA := getHeaderRaw(req.Header, "User-Agent")
 			// 将硬编码版本号替换为有效版本号

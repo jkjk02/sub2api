@@ -1772,6 +1772,21 @@ func (a *Account) GetCLIUserAgent() string {
 	return ""
 }
 
+// GetCLIOS 获取账号配置的 CLI 操作系统模拟值（如 "macOS", "Windows", "Linux"）
+func (a *Account) GetCLIOS() string {
+	return a.GetExtraString("cli_os")
+}
+
+// GetCLIArch 获取账号配置的 CLI 架构模拟值（如 "arm64", "x64"）
+func (a *Account) GetCLIArch() string {
+	return a.GetExtraString("cli_arch")
+}
+
+// GetCCPoolVersion 获取账号从版本池中分配到的 CC 版本号
+func (a *Account) GetCCPoolVersion() string {
+	return a.GetExtraString("cc_pool_version")
+}
+
 // GetUserMsgQueueMode 获取用户消息队列模式
 // "serialize" = 串行队列, "throttle" = 软性限速, "" = 未设置（使用全局配置）
 func (a *Account) GetUserMsgQueueMode() string {
