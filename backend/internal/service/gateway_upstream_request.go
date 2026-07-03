@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -169,11 +170,23 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
+		// OS/Arch 多样性：账号级配置覆盖默认值。
+		if osv := account.GetCLIOS(); osv != "" {
+			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osv)
+		}
+		if arch := account.GetCLIArch(); arch != "" {
+			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
+		}
 	}
 
 	// 若配置了版本覆盖或远程同步了最新版本，更新 User-Agent 中的版本号。
 	if mimicClaudeCode {
 		effectiveVersion := s.GetEffectiveCLIVersion()
+		if poolVersion := account.GetCCPoolVersion(); poolVersion != "" {
+			effectiveVersion = poolVersion
+		} else if s.cfg != nil && len(s.cfg.Gateway.CliSimulation.CCVersionPool) > 0 {
+			effectiveVersion = s.cfg.Gateway.CliSimulation.CCVersionPool[mathrand.Intn(len(s.cfg.Gateway.CliSimulation.CCVersionPool))]
+		}
 		if effectiveVersion != claude.CLICurrentVersion {
 			currentUA := getHeaderRaw(req.Header, "User-Agent")
 			newUA := strings.Replace(currentUA, "claude-cli/"+claude.CLICurrentVersion, "claude-cli/"+effectiveVersion, 1)
