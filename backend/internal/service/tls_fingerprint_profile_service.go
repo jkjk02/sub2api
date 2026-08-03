@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"math/rand/v2"
+	"sort"
 	"sync"
 	"time"
 
@@ -166,6 +167,57 @@ func (s *TLSFingerprintProfileService) getRandomProfile() *tlsfingerprint.Profil
 	}
 
 	return profiles[rand.IntN(len(profiles))].ToTLSProfile()
+}
+
+// ResolveTLSProfileForAccount 在 ResolveTLSProfile 的基础上叠加"版本池"式的稳定分配：
+// 当账号未显式绑定 profile（profile_id==0）且 poolSize>1 时，按 account.ID 从（按 ID
+// 排序的）前 poolSize 个 profile 中确定性挑选一个。这样每个账号获得一个稳定的 TLS
+// 指纹（真实用户的 TLS 栈不会每次请求都变），而不同账号之间自然分散。
+//
+// 若账号已显式绑定 profile（>0）或选择随机（-1），或未启用 TLS 指纹，则保持原行为。
+func (s *TLSFingerprintProfileService) ResolveTLSProfileForAccount(account *Account, poolSize int) *tlsfingerprint.Profile {
+	base := s.ResolveTLSProfile(account)
+	if base == nil || poolSize <= 1 || account == nil {
+		return base
+	}
+	if account.GetTLSFingerprintProfileID() != 0 {
+		return base
+	}
+	if p := s.getProfileByStableIndex(account.ID, poolSize); p != nil {
+		return p
+	}
+	return base
+}
+
+// getProfileByStableIndex 从本地缓存中按 account.ID 确定性挑选一个 profile。
+// profile 按 ID 升序排列以保证顺序稳定；实际候选数为 min(poolSize, 可用数)。
+func (s *TLSFingerprintProfileService) getProfileByStableIndex(accountID int64, poolSize int) *tlsfingerprint.Profile {
+	s.localMu.RLock()
+	defer s.localMu.RUnlock()
+
+	if len(s.localCache) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(s.localCache))
+	for id, p := range s.localCache {
+		if p != nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	n := poolSize
+	if n > len(ids) {
+		n = len(ids)
+	}
+	idx := stableIndexForAccount(accountID, n)
+	p := s.localCache[ids[idx]]
+	if p == nil {
+		return nil
+	}
+	return p.ToTLSProfile()
 }
 
 // ResolveTLSProfile 根据 Account 的配置解析出运行时 TLS Profile

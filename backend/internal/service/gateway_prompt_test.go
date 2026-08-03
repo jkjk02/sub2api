@@ -521,7 +521,7 @@ func TestRewriteSystemForNonClaudeCodeWithPromptBlocks_UsesConfiguredBlocks(t *t
 		]
 	}`
 
-	result := rewriteSystemForNonClaudeCodeWithPromptBlocks(body, "Project instructions", "", blocks)
+	result := rewriteSystemForNonClaudeCodeWithPromptBlocks(body, "Project instructions", "", blocks, "")
 
 	system := gjson.GetBytes(result, "system")
 	require.True(t, system.IsArray())

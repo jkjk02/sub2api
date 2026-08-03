@@ -1,0 +1,28 @@
+# =============================================================================
+# Sub2API Docker Compose - 源码构建叠加层 (二开专用)
+# =============================================================================
+# 作用：让 docker compose 用【本仓库源码】构建镜像，覆盖官方预构建镜像
+#       weishaw/sub2api:latest —— 否则你的二开改动不会生效。
+#
+# 与 docker-compose.local.yml 叠加使用（-f 顺序：先 base 后本文件）：
+#
+#   cd deploy
+#   docker compose -f docker-compose.local.yml -f docker-compose.build.yml up -d --build
+#
+# 之后升级（改了代码后重建）：
+#   docker compose -f docker-compose.local.yml -f docker-compose.build.yml up -d --build
+#
+# 说明：
+# - context: .. 指向仓库根目录（Dockerfile 需要 backend/ frontend/ docs/legal/ 等）。
+# - GOPROXY/GOSUMDB 用国内镜像加速 Go 依赖拉取；海外服务器可删掉这两行走默认。
+# =============================================================================
+
+services:
+  sub2api:
+    image: sub2api:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: https://goproxy.cn,direct
+        GOSUMDB: sum.golang.google.cn

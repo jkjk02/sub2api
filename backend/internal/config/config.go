@@ -1055,10 +1055,18 @@ type CliSimulationConfig struct {
 	MinInterRequestDelayMs int `mapstructure:"min_inter_request_delay_ms"`
 	// MaxInterRequestDelayMs: 最大请求间延迟（毫秒），0 表示不启用
 	MaxInterRequestDelayMs int `mapstructure:"max_inter_request_delay_ms"`
-	// CCVersionPool: CC 版本号池，非空时每个账号从池中随机分配一个版本（模拟不同用户的升级时间差）
+	// CCVersionPool: CC 版本号池，非空时每个账号按 account.ID 确定性分配一个版本
+	//（模拟不同用户的升级时间差；同一账号跨请求稳定，不同账号自然分散）。
 	CCVersionPool []string `mapstructure:"cc_version_pool"`
-	// OSArchPool: OS/Arch 组合池，非空时每个账号随机分配一组（模拟不同用户的操作系统）
+	// OSArchPool: OS/Arch 组合池，非空时每个账号按 account.ID 确定性分配一组（模拟不同用户的操作系统）
 	OSArchPool []OSArchEntry `mapstructure:"os_arch_pool"`
+	// SystemPromptStaticOverride: 覆盖伪装路径注入的"静态"系统提示词扩充段
+	//（{claude_code_expansion_prompt}）。为空则使用内置默认文本。
+	//
+	// 最新研究表明 Anthropic 主要通过 system 提示词的"静态部分"做内容分类来识别第三方，
+	// 且真实 Claude Code 的系统提示词长达 25K+ 字符且随版本变化。为获得最强匹配，建议
+	// 抓取你本机真实 `claude` CLI 发出的 system 静态段原文粘贴到此处（或走后台设置覆盖）。
+	SystemPromptStaticOverride string `mapstructure:"system_prompt_static_override"`
 }
 
 // OSArchEntry represents an OS/Arch diversity entry for CLI simulation.

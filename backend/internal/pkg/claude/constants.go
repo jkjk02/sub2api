@@ -99,6 +99,51 @@ func GetSyncedCLIVersion() string {
 	return ""
 }
 
+// cliVersionOverride holds the config-driven version override (gateway.cli_simulation.cc_version_override).
+var cliVersionOverride atomic.Value // string
+
+// SetCLIVersionOverride sets the config-driven CC version override.
+func SetCLIVersionOverride(v string) {
+	if v != "" {
+		cliVersionOverride.Store(v)
+	}
+}
+
+// GetCLIVersionOverride returns the config-driven override, or empty if unset.
+func GetCLIVersionOverride() string {
+	if v, ok := cliVersionOverride.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// EffectiveCLIVersion returns the single source of truth for the CC version used
+// across the whole request (User-Agent AND billing attribution block MUST agree):
+//  1. config override (cc_version_override)
+//  2. dynamically synced version (npm registry)
+//  3. compile-time constant (CLICurrentVersion)
+//
+// Per-account version diversity (version pool) is layered on top by the service
+// layer, which then feeds the chosen value to both the UA and the billing block.
+func EffectiveCLIVersion() string {
+	if v := GetCLIVersionOverride(); v != "" {
+		return v
+	}
+	if v := GetSyncedCLIVersion(); v != "" {
+		return v
+	}
+	return CLICurrentVersion
+}
+
+// EffectiveUserAgent builds the Claude Code User-Agent string for the given
+// version. Keep the format byte-identical to real Claude CLI traffic.
+func EffectiveUserAgent(version string) string {
+	if version == "" {
+		version = EffectiveCLIVersion()
+	}
+	return "claude-cli/" + version + " (external, cli)"
+}
+
 // FullClaudeCodeMimicryBetas 返回最"像"真实 Claude Code CLI 的完整 beta 列表，
 // 用于 OAuth 账号伪装成 Claude Code 时使用。
 // 顺序与真实 CLI 抓包一致。

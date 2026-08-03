@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -170,29 +169,19 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
-		// OS/Arch 多样性：账号级配置覆盖默认值。
-		if osv := account.GetCLIOS(); osv != "" {
-			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osv)
+		// Explicit account values win; missing values come from a stable account-indexed pool.
+		if osName, arch := s.resolveAccountOSArch(account); osName != "" || arch != "" {
+			if osName != "" {
+				setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osName)
+			}
+			if arch != "" {
+				setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
+			}
 		}
-		if arch := account.GetCLIArch(); arch != "" {
-			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
-		}
-	}
 
-	// 若配置了版本覆盖或远程同步了最新版本，更新 User-Agent 中的版本号。
-	if mimicClaudeCode {
-		effectiveVersion := s.GetEffectiveCLIVersion()
-		if poolVersion := account.GetCCPoolVersion(); poolVersion != "" {
-			effectiveVersion = poolVersion
-		} else if s.cfg != nil && len(s.cfg.Gateway.CliSimulation.CCVersionPool) > 0 {
-			effectiveVersion = s.cfg.Gateway.CliSimulation.CCVersionPool[mathrand.Intn(len(s.cfg.Gateway.CliSimulation.CCVersionPool))]
-		}
-		if effectiveVersion != claude.CLICurrentVersion {
-			currentUA := getHeaderRaw(req.Header, "User-Agent")
-			newUA := strings.Replace(currentUA, "claude-cli/"+claude.CLICurrentVersion, "claude-cli/"+effectiveVersion, 1)
-			setHeaderRaw(req.Header, "User-Agent", newUA)
-		}
-		// 账户级自定义 UA 拥有最终优先级。
+		// Use the same effective version as the billing attribution block.
+		effectiveVersion := s.resolveAccountCLIVersion(account)
+		setHeaderRaw(req.Header, "User-Agent", claude.EffectiveUserAgent(effectiveVersion))
 		if customUA := account.GetCLIUserAgent(); customUA != "" {
 			setHeaderRaw(req.Header, "User-Agent", customUA)
 		}
@@ -539,6 +528,15 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 	// API-key accounts
 	if clientBeta != "" {
 		return stripBetaTokensWithSet(clientBeta, effectiveDropSet), true
+	}
+	if mimicClaudeCode && s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+		s.cfg.Gateway.CliSimulation.ForceCLIBetaForAPIKey {
+		header := claude.APIKeyBetaHeader
+		if strings.Contains(strings.ToLower(modelID), "haiku") {
+			header = claude.APIKeyHaikuBetaHeader
+		}
+		betas := s.mergeExtraBetaTokens(strings.Split(header, ","))
+		return mergeAnthropicBetaDropping(betas, "", effectiveDropSet), true
 	}
 	if s.cfg != nil && s.cfg.Gateway.InjectBetaForAPIKey {
 		if requestNeedsBetaFeatures(body) {

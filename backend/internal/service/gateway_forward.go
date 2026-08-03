@@ -94,6 +94,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	}
 	beginUpstreamResponseModelObservation(c)
 
+	// Apply CLI-simulation overrides and lazily start npm version synchronization once per process.
+	s.ensureCLIVersionSync(ctx)
+
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
 	if account != nil && s.shouldEmulateWebSearch(ctx, account, parsed.GroupID, parsed.Body.Bytes()) {
 		return s.handleWebSearchEmulation(ctx, c, account, parsed)
@@ -199,7 +202,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		systemRaw, _ := parsed.SystemValue()
 		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 		if systemPromptInjectionEnabled {
-			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
+			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))); err != nil {
 				return nil, err
 			}
 			systemRewritten = true
@@ -326,6 +329,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 解析 TLS 指纹 profile（同一请求生命周期内不变，避免重试循环中重复解析）
 	tlsProfile := s.tlsFPProfileService.ResolveTLSProfile(account)
+	if s.cfg != nil && s.cfg.Gateway.CliSimulation.TLSProfilePoolSize > 1 && account != nil && account.IsCliMode() {
+		if profile := s.tlsFPProfileService.ResolveTLSProfileForAccount(account, s.cfg.Gateway.CliSimulation.TLSProfilePoolSize); profile != nil {
+			tlsProfile = profile
+		}
+	}
 
 	// 调试日志：记录即将转发的账号信息
 	logger.LegacyPrintf("service.gateway", "[Forward] Using account: ID=%d Name=%s Platform=%s Type=%s TLSFingerprint=%v Proxy=%s",

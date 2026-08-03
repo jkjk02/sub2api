@@ -269,6 +269,37 @@ gateway:
   #
   # 注意：开启后会影响所有客户端的行为（不仅限于 VS Code / Codex CLI），请谨慎开启。
   force_codex_cli: false
+
+  # CLI simulation settings for account-specific request identity.
+  # CLI 模拟配置；仅对明确开启 cli_mode 的账号生效。
+  cli_simulation:
+    # Enable API-key CLI simulation globally.
+    enabled: false
+    # Force the Claude Code beta set when a cli_mode API-key request has no anthropic-beta header.
+    force_cli_beta_for_apikey: false
+    # Inject Claude Code User-Agent and x-stainless identity headers for cli_mode API-key accounts.
+    enable_cc_mimic_headers_for_apikey: false
+    # Pin one Claude Code version for User-Agent and billing attribution; empty enables npm sync fallback.
+    cc_version_override: ""
+    # Stable account-indexed version pool, for example ["2.1.159", "2.1.160", "2.1.161"].
+    cc_version_pool: []
+    # Stable account-indexed OS/architecture pairs.
+    os_arch_pool: []
+    #  - {os: "darwin", arch: "arm64"}
+    #  - {os: "linux", arch: "amd64"}
+    #  - {os: "windows", arch: "amd64"}
+    # Additional deduplicated anthropic-beta tokens.
+    extra_beta_tokens: []
+    # Override generated cache-control TTL and billing fingerprint salt.
+    cache_control_ttl_override: ""
+    fingerprint_salt_override: ""
+    # Number of cached TLS profiles used for stable per-account selection (>1 enables it).
+    tls_profile_pool_size: 0
+    # Optional request pacing jitter in milliseconds; both values must be positive.
+    min_inter_request_delay_ms: 0
+    max_inter_request_delay_ms: 0
+    # Override the static Claude Code system-prompt expansion block; empty uses the built-in default.
+    system_prompt_static_override: ""
   # Stop rewriting load-shed Codex originators to the official CLI identity.
   # 关闭「把落在上游降载桶的 Codex originator 改写为官方 CLI 身份（codex_cli_rs）」。
   #
