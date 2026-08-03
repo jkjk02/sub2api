@@ -1,6 +1,13 @@
 docs/claude-relay-service/
 .codex
 
+# 本地部署/调试临时文件与密钥（切勿提交）
+/local_run/
+/my-aws-key.pem
+*.pem
+/build.log
+/frontend_build.log
+
 # ===================
 # Go 后端
 # ===================
