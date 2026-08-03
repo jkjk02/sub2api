@@ -54,12 +54,28 @@ const (
 	// to match real Claude CLI traffic as closely as possible. When we need a visual
 	// separator between system blocks, we add "\n\n" at concatenation time.
 	claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
-	// claudeCodeSystemPromptExpansion 是真实 Claude Code 主系统提示词中"与具体工具无关"
-	// 的通用段落（身份/用途总述 + 安全声明 + URL 告警 + Tone and style），逐字取自真实
-	// CLI（2.1.x 一致）。伪装路径用它把 system 块数从 2 提升到 3、体量贴近真实 CC，同时
-	// 刻意排除 # Doing tasks / # Using your tools / # Executing actions 等会污染被代理
-	// 用户行为的工具专属指令。
-	claudeCodeSystemPromptExpansion = `You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
+	maxCacheControlBlocks  = 4 // Anthropic API 允许的最大 cache_control 块数量
+
+	defaultUserGroupRateCacheTTL           = 30 * time.Second
+	defaultModelsListCacheTTL              = 15 * time.Second
+	postUsageBillingTimeout                = 15 * time.Second
+	claudeCodeNoopDeltaKeepaliveMinVersion = "2.1.193"
+	debugGatewayBodyEnv                    = "SUB2API_DEBUG_GATEWAY_BODY"
+	// 上游错误体只需要提取错误 JSON/日志摘要，默认 512KiB 避免错误风暴叠加大请求体。
+	gatewayUpstreamErrorBodyReadLimit int64 = 512 << 10
+)
+
+// claudeCodeSystemPromptExpansion 是伪装路径注入的"静态"系统提示词扩充段
+//（对应模板变量 {claude_code_expansion_prompt}）。
+//
+// 它取自真实 Claude Code 主系统提示词中"与具体工具无关"的通用段落（身份/用途总述 +
+// 安全声明 + URL 告警 + Tone and style），把 system 块数从 2 提升到 3、体量贴近真实 CC，
+// 同时刻意排除 # Doing tasks / # Using your tools 等会污染被代理用户行为的工具专属指令。
+//
+// 声明为 var（而非 const）以便通过 gateway.cli_simulation.system_prompt_static_override
+// 或后台设置整体覆盖为你抓取到的真实 CLI system 静态段原文（最新研究表明 Anthropic 主要
+// 靠 system 静态段的内容分类识别第三方，越贴近真实 CC 越不易被判第三方）。
+var claudeCodeSystemPromptExpansion = `You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
 IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
@@ -70,16 +86,6 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - When referencing specific functions or pieces of code include the pattern file_path:line_number to allow the user to easily navigate to the source code location.
  - When referencing GitHub issues or pull requests, use the owner/repo#123 format (e.g. anthropics/claude-code#100) so they render as clickable links.
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
-	maxCacheControlBlocks = 4 // Anthropic API 允许的最大 cache_control 块数量
-
-	defaultUserGroupRateCacheTTL           = 30 * time.Second
-	defaultModelsListCacheTTL              = 15 * time.Second
-	postUsageBillingTimeout                = 15 * time.Second
-	claudeCodeNoopDeltaKeepaliveMinVersion = "2.1.193"
-	debugGatewayBodyEnv                    = "SUB2API_DEBUG_GATEWAY_BODY"
-	// 上游错误体只需要提取错误 JSON/日志摘要，默认 512KiB 避免错误风暴叠加大请求体。
-	gatewayUpstreamErrorBodyReadLimit int64 = 512 << 10
-)
 
 const (
 	claudeMimicDebugInfoKey = "claude_mimic_debug_info"
@@ -1375,8 +1381,15 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 		userID = generateClientID()
 	}
 
-	// session_id 使用真随机 UUID（真实 Claude Code 使用进程级随机 UUID）
-	sessionID := uuid.NewString()
+	// session_id 用"会话级稳定种子"派生（账号 + 客户端区分因子 + 首条 user 文本）：
+	// 随对话在尾部追加 messages 时保持不变，贴近真实 CC 进程级稳定的 session_id。
+	// 真随机 UUID 会让同一会话每个请求都换 session_id，反而是自动化特征。
+	var firstUserText string
+	if parsed.Body != nil {
+		firstUserText = extractFirstUserText(parsed.Body.Bytes())
+	}
+	seed := buildStableSessionSeed(account.ID, sessionContextDiscriminator(parsed.SessionContext), firstUserText)
+	sessionID := generateSessionUUID(seed)
 
 	// 根据指纹 UA 版本选择输出格式
 	var uaVersion string
@@ -1421,7 +1434,7 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 	systemRewritten := false
 	if systemPromptInjectionEnabled && !strings.Contains(strings.ToLower(model), "haiku") {
-		body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks)
+		body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))
 		systemRewritten = true
 	}
 
@@ -1492,7 +1505,13 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 		userID = generateClientID()
 	}
 
-	sessionID := uuid.NewString()
+	// 与 buildOAuthMetadataUserID 一致：会话级稳定种子，避免整 body 哈希导致每轮变化。
+	var clientDiscriminator string
+	if fp != nil {
+		clientDiscriminator = fp.ClientID
+	}
+	seed := buildStableSessionSeed(account.ID, clientDiscriminator, extractFirstUserText(body))
+	sessionID := generateSessionUUID(seed)
 
 	var uaVersion string
 	if fp != nil {
@@ -4335,11 +4354,11 @@ func injectClaudeCodePrompt(body []byte, system any) []byte {
 // 无法通过检测，因为后续内容仍为非 Claude Code 格式。
 // 策略：将原始 system prompt 提取并注入为 user/assistant 消息对，system 仅保留 Claude Code 标识。
 func rewriteSystemForNonClaudeCode(body []byte, system any) []byte {
-	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "")
+	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, "", "", "")
 }
 
 func rewriteSystemForNonClaudeCodeWithPrompt(body []byte, system any, expansionPrompt string) []byte {
-	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, expansionPrompt, "")
+	return rewriteSystemForNonClaudeCodeWithPromptBlocks(body, system, expansionPrompt, "", "")
 }
 
 type claudeOAuthSystemPromptBlockConfig struct {
@@ -4401,19 +4420,26 @@ func decodeClaudeOAuthSystemPromptCacheControl(raw json.RawMessage) (any, error)
 	return value, nil
 }
 
-func expandClaudeOAuthSystemPromptTextTemplate(body []byte, text string, expansionPrompt string) (string, error) {
+func expandClaudeOAuthSystemPromptTextTemplate(body []byte, text string, expansionPrompt string, cliVersion string) (string, error) {
 	if text == "" {
 		return "", nil
 	}
+	// cliVersion MUST match the version used for the User-Agent (see
+	// resolveAccountCLIVersion); a mismatch between UA and the billing block's
+	// cc_version is itself a third-party tell. Empty falls back to the
+	// process-wide effective version.
+	if cliVersion == "" {
+		cliVersion = claude.EffectiveCLIVersion()
+	}
 	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
-	billingText, err := buildBillingAttributionText(body, claude.CLICurrentVersion)
+	billingText, err := buildBillingAttributionText(body, cliVersion)
 	if err != nil {
 		return "", err
 	}
-	fp := computeClaudeCodeFingerprint(body, claude.CLICurrentVersion)
+	fp := computeClaudeCodeFingerprint(body, cliVersion)
 	replacer := strings.NewReplacer(
 		"{billing_header}", billingText,
-		"{cc_version}", claude.CLICurrentVersion,
+		"{cc_version}", cliVersion,
 		"{fp}", fp,
 		"{claude_code_system_prompt}", claudeCodeSystemPrompt,
 		"{claude_code_expansion_prompt}", expansionPrompt,
@@ -4445,7 +4471,7 @@ func defaultClaudeOAuthSystemPromptBlockConfig() []claudeOAuthSystemPromptBlockC
 	}
 }
 
-func buildClaudeOAuthSystemPromptBlocksJSON(body []byte, expansionPrompt string, blocksConfig string) ([][]byte, error) {
+func buildClaudeOAuthSystemPromptBlocksJSON(body []byte, expansionPrompt string, blocksConfig string, cliVersion string) ([][]byte, error) {
 	blocks, err := parseClaudeOAuthSystemPromptBlocksConfig(blocksConfig)
 	if err != nil {
 		return nil, err
@@ -4466,7 +4492,7 @@ func buildClaudeOAuthSystemPromptBlocksJSON(body []byte, expansionPrompt string,
 		if blockType != "text" {
 			return nil, fmt.Errorf("system block %d type %q is not supported", i, block.Type)
 		}
-		text, err := expandClaudeOAuthSystemPromptTextTemplate(body, block.Text, expansionPrompt)
+		text, err := expandClaudeOAuthSystemPromptTextTemplate(body, block.Text, expansionPrompt, cliVersion)
 		if err != nil {
 			return nil, err
 		}
@@ -4509,7 +4535,7 @@ func ValidateClaudeOAuthSystemPromptBlocksConfig(raw string) error {
 	return nil
 }
 
-func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expansionPrompt string, blocksConfig string) []byte {
+func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expansionPrompt string, blocksConfig string, cliVersion string) []byte {
 	system = normalizeSystemParam(system)
 	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
 
@@ -4542,10 +4568,10 @@ func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expa
 	//    缺失 billing block 的系统 payload 是 Anthropic 判定第三方的关键信号之一
 	//    （真实 CLI 每个请求都带）。新版 CLI 已取消 cch=... 签名字段，故 block 不再注入
 	//    cch（见 buildBillingAttributionText）。
-	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, blocksConfig)
+	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, blocksConfig, cliVersion)
 	if blockErr != nil {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to build configured Claude OAuth system blocks: %v", blockErr)
-		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, "")
+		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, "", cliVersion)
 	}
 	if blockErr != nil {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to build default Claude OAuth system blocks: %v", blockErr)
@@ -4871,6 +4897,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return nil, fmt.Errorf("parse request: empty request")
 	}
 
+	// 懒启动 CC 版本同步循环并应用 cli_simulation 配置覆盖（进程内只执行一次）。
+	s.ensureCLIVersionSync(ctx)
+
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
 	if account != nil && s.shouldEmulateWebSearch(ctx, account, parsed.GroupID, parsed.Body.Bytes()) {
 		return s.handleWebSearchEmulation(ctx, c, account, parsed)
@@ -4961,7 +4990,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		systemRaw, _ := parsed.SystemValue()
 		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 		if systemPromptInjectionEnabled {
-			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks)); err != nil {
+			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))); err != nil {
 				return nil, err
 			}
 			systemRewritten = true
@@ -5086,6 +5115,14 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 解析 TLS 指纹 profile（同一请求生命周期内不变，避免重试循环中重复解析）
 	tlsProfile := s.tlsFPProfileService.ResolveTLSProfile(account)
+	// cli_mode 账号 + TLSProfilePoolSize>1：为账号确定性分配一个稳定的 TLS profile
+	// （每账号稳定、账号间分散；真实用户的 TLS 栈不会每次请求都变）。
+	if s.cfg != nil && s.cfg.Gateway.CliSimulation.TLSProfilePoolSize > 1 &&
+		account != nil && account.IsCliMode() {
+		if p := s.tlsFPProfileService.ResolveTLSProfileForAccount(account, s.cfg.Gateway.CliSimulation.TLSProfilePoolSize); p != nil {
+			tlsProfile = p
+		}
+	}
 
 	// 调试日志：记录即将转发的账号信息
 	logger.LegacyPrintf("service.gateway", "[Forward] Using account: ID=%d Name=%s Platform=%s Type=%s TLSFingerprint=%v Proxy=%s",
@@ -6938,37 +6975,22 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
-		// OS/Arch 多样性：若账号配置了 cli_os / cli_arch，覆盖默认值
-		// （模拟不同用户使用不同操作系统的自然分布）
-		if osv := account.GetCLIOS(); osv != "" {
-			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osv)
-		}
-		if arch := account.GetCLIArch(); arch != "" {
-			setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
-		}
-	}
-
-	// 若配置了版本覆盖或远程同步了最新版本，更新 User-Agent 中的版本号
-	if mimicClaudeCode {
-		effectiveVersion := s.GetEffectiveCLIVersion()
-		// 版本池多样性：若账号未分配池版本，从配置池中随机选取并存入 account extra
-		if poolV := account.GetCCPoolVersion(); poolV != "" {
-			effectiveVersion = poolV
-		} else if s.cfg != nil && len(s.cfg.Gateway.CliSimulation.CCVersionPool) > 0 {
-			poolV := s.cfg.Gateway.CliSimulation.CCVersionPool[mathrand.Intn(len(s.cfg.Gateway.CliSimulation.CCVersionPool))]
-			effectiveVersion = poolV
-		}
-		if effectiveVersion != claude.CLICurrentVersion {
-			currentUA := getHeaderRaw(req.Header, "User-Agent")
-			// 将硬编码版本号替换为有效版本号
-			newUA := strings.Replace(currentUA, "claude-cli/"+claude.CLICurrentVersion, "claude-cli/"+effectiveVersion, 1)
-			setHeaderRaw(req.Header, "User-Agent", newUA)
-			// 同步更新 x-stainless-package-version 中的版本（如果存在）
-			if pv := getHeaderRaw(req.Header, "X-Stainless-Package-Version"); pv != "" {
-				_ = pv // future: sync x-stainless-package-version too
+		// OS/Arch 多样性：显式 per-account cli_os/cli_arch 优先，否则从 OSArchPool
+		// 按 account.ID 确定性分配（同一账号稳定，不同账号自然分散）。
+		if osv, arch := s.resolveAccountOSArch(account); osv != "" || arch != "" {
+			if osv != "" {
+				setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-OS"), osv)
+			}
+			if arch != "" {
+				setHeaderRaw(req.Header, resolveWireCasing("X-Stainless-Arch"), arch)
 			}
 		}
-		// 账户级自定义 UA 覆盖
+
+		// User-Agent 版本号：与 billing attribution block 共用同一 effective 版本
+		// （resolveAccountCLIVersion）。二者若不一致本身就是第三方特征。
+		effectiveVersion := s.resolveAccountCLIVersion(account)
+		setHeaderRaw(req.Header, "User-Agent", claude.EffectiveUserAgent(effectiveVersion))
+		// 账户级自定义 UA 覆盖（最高优先级）
 		if customUA := account.GetCLIUserAgent(); customUA != "" {
 			setHeaderRaw(req.Header, "User-Agent", customUA)
 		}
@@ -7315,6 +7337,17 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 	// API-key accounts
 	if clientBeta != "" {
 		return stripBetaTokensWithSet(clientBeta, effectiveDropSet), true
+	}
+	// cli_mode API-key 账号 + ForceCLIBetaForAPIKey：即使客户端未携带 anthropic-beta
+	// 也强制写入 CLI beta header，与真实 Claude Code 的 beta 集合对齐。
+	if mimicClaudeCode && s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+		s.cfg.Gateway.CliSimulation.ForceCLIBetaForAPIKey {
+		header := claude.APIKeyBetaHeader
+		if strings.Contains(strings.ToLower(modelID), "haiku") {
+			header = claude.APIKeyHaikuBetaHeader
+		}
+		betas := s.mergeExtraBetaTokens(strings.Split(header, ","))
+		return mergeAnthropicBetaDropping(betas, "", effectiveDropSet), true
 	}
 	if s.cfg != nil && s.cfg.Gateway.InjectBetaForAPIKey {
 		if requestNeedsBetaFeatures(body) {

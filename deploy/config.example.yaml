@@ -205,6 +205,42 @@ gateway:
   #
   # 注意：开启后会影响所有客户端的行为（不仅限于 VS Code / Codex CLI），请谨慎开启。
   force_codex_cli: false
+
+  # CLI simulation / risk mitigation for the Claude account pool (二开号池风控规避)
+  # CLI 模拟 / 号池风控规避配置。仅在你了解各项含义时按需开启。
+  cli_simulation:
+    # 全局开关：是否允许非 OAuth（API Key）账号在开启 cli_mode 后进行 CLI 模拟
+    enabled: false
+    # 即使客户端未携带 anthropic-beta，也为 cli_mode 的 API Key 账号强制写入 CLI beta header
+    force_cli_beta_for_apikey: false
+    # 是否对 API Key 账号也注入 Claude Code mimic headers（UA / x-stainless-* / x-app 等）
+    enable_cc_mimic_headers_for_apikey: false
+    # 覆盖对外伪装的 Claude Code 版本号；同时作用于 User-Agent 与 billing block（保持一致）。
+    # 留空则走 npm 动态同步（每 2 小时刷新一次）+ 编译期常量兜底。
+    cc_version_override: ""
+    # CC 版本号池：非空时每个账号按 account.ID 确定性分配一个版本（同账号稳定、跨账号分散）。
+    # 例如： ["2.1.159", "2.1.160", "2.1.161"]
+    cc_version_pool: []
+    # OS/Arch 组合池：非空时每个账号按 account.ID 确定性分配一组，模拟不同用户的操作系统分布。
+    os_arch_pool: []
+    #  - {os: "darwin", arch: "arm64"}
+    #  - {os: "linux",  arch: "amd64"}
+    #  - {os: "windows", arch: "amd64"}
+    # 追加到 anthropic-beta 的额外 token（去重后合并到 mimic beta 列表）
+    extra_beta_tokens: []
+    # 覆盖网关自生成 cache_control 块的默认 TTL（留空使用内置默认 5m）
+    cache_control_ttl_override: ""
+    # 覆盖 billing attribution 指纹 salt（留空使用内置默认值；一般无需修改）
+    fingerprint_salt_override: ""
+    # TLS 指纹 profile 池大小，>1 时为 cli_mode 且未绑定 profile 的账号按 account.ID 稳定分配
+    tls_profile_pool_size: 0
+    # 请求间抖动延迟（毫秒），模拟真人节奏以降低自动化检测；min/max 同时 >0 才启用
+    min_inter_request_delay_ms: 0
+    max_inter_request_delay_ms: 0
+    # 覆盖伪装路径注入的“静态”系统提示词扩充段（{claude_code_expansion_prompt}）。
+    # 最新研究表明 Anthropic 主要靠 system 静态段的内容分类识别第三方；为获得最强匹配，
+    # 建议抓取你本机真实 `claude` CLI 发出的 system 静态段原文粘贴到此处，留空则用内置默认文本。
+    system_prompt_static_override: ""
   # Enable Codex image-generation bridge injection for /openai/v1/responses.
   # 是否为 Codex /responses 请求自动注入 image_generation 工具与桥接指令。
   #
