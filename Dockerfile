@@ -34,6 +34,9 @@ RUN pnpm install --frozen-lockfile
 # Copy only that subtree to keep the build dependency minimal.
 COPY frontend/ ./
 COPY docs/legal/ /app/docs/legal/
+# 低内存构建机（如 1GB 实例）上 vite 构建易触发 Node 堆上限 (OOM, exit 134)。
+# 放宽堆上限到 2GB，由宿主 swap 兜底，避免 "JavaScript heap out of memory"。
+ENV NODE_OPTIONS=--max-old-space-size=2048
 RUN pnpm run build
 
 # -----------------------------------------------------------------------------
