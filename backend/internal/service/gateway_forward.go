@@ -376,6 +376,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	var resp *http.Response
 	lastWireBody := body
 	retryStart := time.Now()
+	authRecoveryAttempted := false
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
@@ -424,6 +425,41 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				},
 			})
 			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		}
+
+		// Anthropic OAuth 的服务端登录态可能在本地 expires_at 到期前失效。
+		// 仅对明确的鉴权失败强制刷新，并且整次请求最多重放一次，避免把普通 400
+		// 参数错误误判为掉登录或形成刷新循环。
+		if !authRecoveryAttempted && attempt < maxRetryAttempts &&
+			time.Since(retryStart) < maxRetryElapsed &&
+			account.Platform == PlatformAnthropic && account.Type == AccountTypeOAuth &&
+			s.claudeTokenProvider != nil &&
+			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			respBody, readErr := s.readUpstreamErrorBody(resp)
+			if readErr == nil {
+				_ = resp.Body.Close()
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+				if isAnthropicOAuthAuthenticationFailure(resp.StatusCode, respBody) {
+					authRecoveryAttempted = true
+					replacementToken, refreshErr := s.claudeTokenProvider.RefreshAfterAuthFailure(ctx, account, token)
+					if refreshErr == nil && strings.TrimSpace(replacementToken) != "" && replacementToken != token {
+						slog.Info("claude_oauth_auth_recovered",
+							"account_id", account.ID,
+							"upstream_status", resp.StatusCode,
+						)
+						token = replacementToken
+						_ = resp.Body.Close()
+						continue
+					}
+					if refreshErr != nil {
+						slog.Warn("claude_oauth_auth_recovery_failed",
+							"account_id", account.ID,
+							"upstream_status", resp.StatusCode,
+							"error", refreshErr,
+						)
+					}
+				}
+			}
 		}
 
 		// 优先检测thinking block签名错误（400）并重试一次

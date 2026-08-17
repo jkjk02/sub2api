@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	claudeTokenRefreshSkew = 3 * time.Minute
-	claudeTokenCacheSkew   = 5 * time.Minute
-	claudeLockWaitTime     = 200 * time.Millisecond
+	claudeTokenRefreshSkew         = 3 * time.Minute
+	claudeTokenCacheSkew           = 5 * time.Minute
+	claudeLockWaitTime             = 200 * time.Millisecond
+	claudeAuthRecoveryWaitAttempts = 5
 )
 
 // ClaudeTokenCache token cache interface.
@@ -158,6 +159,105 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	}
 
+	return accessToken, nil
+}
+
+// RefreshAfterAuthFailure refreshes an Anthropic OAuth token after upstream
+// explicitly rejects the access token, even when the local expires_at is still
+// in the future. The rejected token is used as a concurrency guard so a token
+// already rotated by another request is reused instead of refreshed again.
+func (p *ClaudeTokenProvider) RefreshAfterAuthFailure(ctx context.Context, account *Account, rejectedAccessToken string) (string, error) {
+	if p == nil || p.refreshAPI == nil || p.executor == nil {
+		return "", errors.New("claude oauth refresh is not configured")
+	}
+	if account == nil {
+		return "", errors.New("account is nil")
+	}
+	if account.Platform != PlatformAnthropic || account.Type != AccountTypeOAuth {
+		return "", errors.New("not an anthropic oauth account")
+	}
+	rejectedAccessToken = strings.TrimSpace(rejectedAccessToken)
+	if rejectedAccessToken == "" {
+		return "", errors.New("rejected access token is empty")
+	}
+
+	result, err := p.refreshAPI.RefreshAfterAccessTokenRejected(
+		withOAuthRefreshRequestPath(ctx),
+		account,
+		p.executor,
+		rejectedAccessToken,
+	)
+	if err != nil {
+		return "", err
+	}
+	if result == nil {
+		return "", errors.New("claude oauth refresh returned no result")
+	}
+	if result.LockHeld {
+		return p.waitForReplacementAccessToken(ctx, account, rejectedAccessToken)
+	}
+	if result.Account == nil {
+		return "", errors.New("claude oauth refresh returned no account")
+	}
+
+	return p.publishReplacementAccessToken(ctx, result.Account, rejectedAccessToken)
+}
+
+func (p *ClaudeTokenProvider) waitForReplacementAccessToken(ctx context.Context, account *Account, rejectedAccessToken string) (string, error) {
+	cacheKey := ClaudeTokenCacheKey(account)
+	for attempt := 0; attempt < claudeAuthRecoveryWaitAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(claudeLockWaitTime):
+		}
+
+		if p.tokenCache != nil {
+			token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey)
+			token = strings.TrimSpace(token)
+			if cacheErr == nil && token != "" && token != rejectedAccessToken {
+				return token, nil
+			}
+		}
+		if p.accountRepo != nil {
+			freshAccount, readErr := p.accountRepo.GetByID(ctx, account.ID)
+			if readErr == nil && freshAccount != nil {
+				token := strings.TrimSpace(freshAccount.GetCredential("access_token"))
+				if token != "" && token != rejectedAccessToken {
+					return p.publishReplacementAccessToken(ctx, freshAccount, rejectedAccessToken)
+				}
+			}
+		}
+	}
+	return "", errors.New("timed out waiting for replacement claude access token")
+}
+
+func (p *ClaudeTokenProvider) publishReplacementAccessToken(ctx context.Context, account *Account, rejectedAccessToken string) (string, error) {
+	accessToken := strings.TrimSpace(account.GetCredential("access_token"))
+	if accessToken == "" {
+		return "", errors.New("access_token not found after claude oauth refresh")
+	}
+	if accessToken == rejectedAccessToken {
+		return "", errors.New("claude oauth refresh did not replace rejected access token")
+	}
+
+	if p.tokenCache != nil {
+		ttl := 30 * time.Minute
+		if expiresAt := account.GetCredentialAsTime("expires_at"); expiresAt != nil {
+			until := time.Until(*expiresAt)
+			switch {
+			case until > claudeTokenCacheSkew:
+				ttl = until - claudeTokenCacheSkew
+			case until > 0:
+				ttl = until
+			default:
+				ttl = time.Minute
+			}
+		}
+		if err := p.tokenCache.SetAccessToken(ctx, ClaudeTokenCacheKey(account), accessToken, ttl); err != nil {
+			slog.Warn("claude_token_cache_set_failed_after_auth_recovery", "account_id", account.ID, "error", err)
+		}
+	}
 	return accessToken, nil
 }
 

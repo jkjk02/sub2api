@@ -1107,3 +1107,137 @@ func TestAntigravityProviderRefreshPolicy(t *testing.T) {
 	require.Equal(t, ProviderLockHeldUseExistingToken, p.OnLockHeld)
 	require.Equal(t, time.Duration(0), p.FailureTTL)
 }
+
+func TestRefreshAfterAccessTokenRejected_ForcesRefreshBeforeExpiry(t *testing.T) {
+	futureExpiry := time.Now().Add(time.Hour)
+	account := &Account{
+		ID:       901,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token":  "rejected-token",
+			"refresh_token": "refresh-token",
+			"expires_at":    futureExpiry,
+		},
+	}
+	repo := &refreshAPIAccountRepo{account: account}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: false,
+		credentials: map[string]any{
+			"access_token":  "replacement-token",
+			"refresh_token": "replacement-refresh-token",
+			"expires_at":    time.Now().Add(2 * time.Hour),
+		},
+	}
+
+	api := NewOAuthRefreshAPI(repo, cache)
+	result, err := api.RefreshAfterAccessTokenRejected(
+		withOAuthRefreshRequestPath(context.Background()),
+		account,
+		executor,
+		"rejected-token",
+	)
+
+	require.NoError(t, err)
+	require.True(t, result.Refreshed)
+	require.Equal(t, 1, executor.refreshCalls)
+	require.Equal(t, 1, repo.updateCredentialsCalls)
+	require.Equal(t, "replacement-token", result.Account.GetCredential("access_token"))
+}
+
+func TestRefreshAfterAccessTokenRejected_ReusesConcurrentlyReplacedToken(t *testing.T) {
+	account := &Account{
+		ID:       902,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token":  "durable-replacement-token",
+			"refresh_token": "rotated-refresh-token",
+			"expires_at":    time.Now().Add(time.Hour),
+		},
+	}
+	repo := &refreshAPIAccountRepo{account: account}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: false,
+		credentials:  map[string]any{"access_token": "must-not-be-used"},
+	}
+
+	api := NewOAuthRefreshAPI(repo, cache)
+	result, err := api.RefreshAfterAccessTokenRejected(
+		withOAuthRefreshRequestPath(context.Background()),
+		account,
+		executor,
+		"rejected-token",
+	)
+
+	require.NoError(t, err)
+	require.False(t, result.Refreshed)
+	require.Equal(t, 0, executor.refreshCalls)
+	require.Equal(t, 0, repo.updateCredentialsCalls)
+	require.Equal(t, "durable-replacement-token", result.Account.GetCredential("access_token"))
+}
+
+func TestRefreshAfterAccessTokenRejected_ConcurrentRequestsRefreshOnce(t *testing.T) {
+	account := &Account{
+		ID:       904,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token":  "rejected-token",
+			"refresh_token": "refresh-token",
+			"expires_at":    time.Now().Add(time.Hour),
+		},
+	}
+	repo := &refreshAPIAccountRepo{account: account}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: false,
+		delay:        50 * time.Millisecond,
+		credentials: map[string]any{
+			"access_token":  "replacement-token",
+			"refresh_token": "replacement-refresh-token",
+			"expires_at":    time.Now().Add(2 * time.Hour),
+		},
+	}
+	api := NewOAuthRefreshAPI(repo, nil)
+
+	results := make(chan *OAuthRefreshResult, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := api.RefreshAfterAccessTokenRejected(
+				withOAuthRefreshRequestPath(context.Background()),
+				account,
+				executor,
+				"rejected-token",
+			)
+			results <- result
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	refreshedCount := 0
+	for result := range results {
+		require.NotNil(t, result)
+		if result.Refreshed {
+			refreshedCount++
+		}
+		require.Equal(t, "replacement-token", result.Account.GetCredential("access_token"))
+	}
+	require.Equal(t, 1, refreshedCount)
+	require.Equal(t, 1, executor.refreshCalls)
+	require.Equal(t, 1, repo.updateCredentialsCalls)
+}

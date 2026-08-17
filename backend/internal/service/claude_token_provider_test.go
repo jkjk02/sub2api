@@ -937,3 +937,36 @@ func TestClaudeTokenProvider_Real_NilCredentials(t *testing.T) {
 	require.Contains(t, err.Error(), "access_token not found")
 	require.Empty(t, token)
 }
+
+func TestClaudeTokenProviderRefreshAfterAuthFailurePublishesReplacement(t *testing.T) {
+	account := &Account{
+		ID:       903,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token":  "rejected-token",
+			"refresh_token": "refresh-token",
+			"expires_at":    time.Now().Add(time.Hour),
+		},
+	}
+	repo := &refreshAPIAccountRepo{account: account}
+	cache := newClaudeTokenCacheStub()
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: false,
+		credentials: map[string]any{
+			"access_token":  "replacement-token",
+			"refresh_token": "replacement-refresh-token",
+			"expires_at":    time.Now().Add(2 * time.Hour),
+		},
+	}
+	provider := NewClaudeTokenProvider(repo, cache, nil)
+	provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), executor)
+
+	token, err := provider.RefreshAfterAuthFailure(context.Background(), account, "rejected-token")
+
+	require.NoError(t, err)
+	require.Equal(t, "replacement-token", token)
+	require.Equal(t, "replacement-token", cache.tokens[ClaudeTokenCacheKey(account)])
+	require.Equal(t, 1, executor.refreshCalls)
+}

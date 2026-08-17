@@ -307,6 +307,69 @@ func extractUpstreamErrorMessage(body []byte) string {
 	return gjson.GetBytes(body, "message").String()
 }
 
+func isAnthropicOAuthAuthenticationFailure(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusUnauthorized && statusCode != http.StatusForbidden {
+		return false
+	}
+	// A 401 from the Anthropic OAuth endpoint is itself an explicit access-token rejection.
+	if statusCode == http.StatusUnauthorized {
+		return true
+	}
+
+	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	if errorType == "" {
+		errorType = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+	}
+	errorCode := strings.ToLower(strings.TrimSpace(extractUpstreamErrorCode(body)))
+	for _, value := range []string{errorType, errorCode} {
+		switch value {
+		case "authentication_error", "authentication_required", "invalid_token", "token_expired", "not_authenticated", "unauthorized":
+			return true
+		}
+	}
+
+	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(body)))
+	if message == "" {
+		// A few compatible upstreams return a plain-text error body. Matching is
+		// still limited to strong authentication phrases below.
+		message = strings.ToLower(strings.TrimSpace(string(body)))
+	}
+	if message == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"invalid access token",
+		"access token is invalid",
+		"expired access token",
+		"access token has expired",
+		"access token was revoked",
+		"oauth token is invalid",
+		"oauth token has expired",
+		"oauth token was revoked",
+		"authentication required",
+		"failed to authenticate",
+		"not authenticated",
+		"login required",
+		"log in again",
+		"login again",
+		"please log in",
+		"please login",
+		"signed out",
+		"logged out",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+
+	if strings.Contains(message, "bearer token") &&
+		(strings.Contains(message, "invalid") || strings.Contains(message, "expired") ||
+			strings.Contains(message, "revoked") || strings.Contains(message, "missing")) {
+		return true
+	}
+	return false
+}
+
 func extractUpstreamErrorCode(body []byte) string {
 	if code := strings.TrimSpace(gjson.GetBytes(body, "error.code").String()); code != "" {
 		return code

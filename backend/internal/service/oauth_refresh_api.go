@@ -171,6 +171,33 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	executor OAuthRefreshExecutor,
 	refreshWindow time.Duration,
 ) (*OAuthRefreshResult, error) {
+	return api.refresh(ctx, account, executor, refreshWindow, "")
+}
+
+// RefreshAfterAccessTokenRejected forces one refresh after upstream explicitly
+// rejects the access token. If another request has already replaced the
+// rejected token in durable storage, that newer token is returned without
+// consuming the refresh token again.
+func (api *OAuthRefreshAPI) RefreshAfterAccessTokenRejected(
+	ctx context.Context,
+	account *Account,
+	executor OAuthRefreshExecutor,
+	rejectedAccessToken string,
+) (*OAuthRefreshResult, error) {
+	rejectedAccessToken = strings.TrimSpace(rejectedAccessToken)
+	if rejectedAccessToken == "" {
+		return nil, errors.New("rejected access token is empty")
+	}
+	return api.refresh(ctx, account, executor, 0, rejectedAccessToken)
+}
+
+func (api *OAuthRefreshAPI) refresh(
+	ctx context.Context,
+	account *Account,
+	executor OAuthRefreshExecutor,
+	refreshWindow time.Duration,
+	rejectedAccessToken string,
+) (*OAuthRefreshResult, error) {
 	if api == nil || api.accountRepo == nil {
 		return nil, errors.New("oauth refresh account repository is not configured")
 	}
@@ -246,8 +273,15 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 		return &OAuthRefreshResult{Account: freshAccount}, nil
 	}
 
-	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
-	if !executor.NeedsRefresh(freshAccount, refreshWindow) {
+	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）。
+	// 上游明确拒绝 access token 时不能只依赖 expires_at，因为服务端撤销、
+	// 登录态失效等情况通常不会同步修改本地过期时间。
+	if rejectedAccessToken != "" {
+		freshAccessToken := strings.TrimSpace(freshAccount.GetCredential("access_token"))
+		if freshAccessToken != "" && freshAccessToken != rejectedAccessToken {
+			return &OAuthRefreshResult{Account: freshAccount}, nil
+		}
+	} else if !executor.NeedsRefresh(freshAccount, refreshWindow) {
 		return &OAuthRefreshResult{
 			Account: freshAccount,
 		}, nil
