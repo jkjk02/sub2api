@@ -123,6 +123,35 @@ func TestAccountRepository_GrokCredentialCommitCarriesOutboxAcrossCallerCancella
 	}
 }
 
+func TestAccountRepository_SetClaudeOAuthErrorIfCredentialsUnchanged_UsesExactCredentialsAndQuarantineMetadata(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	applied, err := repo.SetClaudeOAuthErrorIfCredentialsUnchanged(
+		context.Background(),
+		42,
+		map[string]any{"access_token": "observed", "refresh_token": "refresh"},
+		"claude_refresh_token_invalid",
+		"Claude OAuth authorization expired; re-authorize this account",
+	)
+
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Len(t, exec.execQueries, 1)
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "WITH updated AS")
+	require.Contains(t, normalized, "INSERT INTO scheduler_outbox")
+	require.Contains(t, normalized, "platform = $5")
+	require.Contains(t, normalized, "type = $6")
+	require.Contains(t, normalized, "credentials = $8::jsonb")
+	require.NotContains(t, normalized, "schedulable = FALSE")
+	require.Contains(t, normalized, "claude_needs_reauth")
+	require.Contains(t, normalized, "claude_needs_reauth_reason")
+	require.Len(t, exec.execArgs, 1)
+	require.Equal(t, service.StatusActive, exec.execArgs[0][6])
+	require.Contains(t, exec.execArgs[0][7], `"refresh_token":"refresh"`)
+}
+
 func TestAccountRepository_SetGrokOAuthErrorIfCredentialsUnchanged_RequiresActiveExactCredentialMatch(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)

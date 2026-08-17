@@ -38,6 +38,30 @@ func TestRedactText_GOCSPX(t *testing.T) {
 	}
 }
 
+func TestRedactText_AuthorizationAndCookieHeaders(t *testing.T) {
+	in := "Authorization: Bearer sk-ant-secret\nCookie: session=secret; other=value\nProxy-Authorization: Basic dXNlcjpwYXNz"
+	out := RedactText(in)
+	for _, secret := range []string{"sk-ant-secret", "session=secret", "dXNlcjpwYXNz"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("expected %q redacted, got %q", secret, out)
+		}
+	}
+	if !strings.Contains(out, "Authorization: ***") || !strings.Contains(out, "Cookie: ***") {
+		t.Fatalf("expected headers redacted, got %q", out)
+	}
+}
+
+func TestRedactText_BearerTokenInFreeFormError(t *testing.T) {
+	in := "provider rejected Bearer eyJhbGciOiJIUzI1Ni.secret.signature"
+	out := RedactText(in)
+	if strings.Contains(out, "eyJhbGci") {
+		t.Fatalf("expected bearer token redacted, got %q", out)
+	}
+	if !strings.Contains(out, "Bearer ***") {
+		t.Fatalf("expected bearer marker preserved, got %q", out)
+	}
+}
+
 func TestRedactText_ExtraKeyCacheUsesNormalizedSortedKey(t *testing.T) {
 	clearExtraTextPatternCache()
 

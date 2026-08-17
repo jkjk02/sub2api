@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 )
 
 const (
@@ -89,7 +91,7 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			if p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
 				return "", err
 			}
-			slog.Warn("claude_token_refresh_failed", "account_id", account.ID, "error", err)
+			slog.Warn("claude_token_refresh_failed", "account_id", account.ID, "error", logredact.RedactText(err.Error()))
 			refreshFailed = true
 		} else if result.LockHeld {
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
@@ -168,7 +170,7 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 // already rotated by another request is reused instead of refreshed again.
 func (p *ClaudeTokenProvider) RefreshAfterAuthFailure(ctx context.Context, account *Account, rejectedAccessToken string) (string, error) {
 	if p == nil || p.refreshAPI == nil || p.executor == nil {
-		return "", errors.New("claude oauth refresh is not configured")
+		return "", classifyClaudeOAuthRefreshFailure(errors.New("claude oauth refresh is not configured"))
 	}
 	if account == nil {
 		return "", errors.New("account is nil")
@@ -181,6 +183,14 @@ func (p *ClaudeTokenProvider) RefreshAfterAuthFailure(ctx context.Context, accou
 		return "", errors.New("rejected access token is empty")
 	}
 
+	expectedCredentials, snapshotErr := cloneAccountJSONMap(account.Credentials)
+	if snapshotErr != nil {
+		return "", &ClaudeOAuthAuthRecoveryError{
+			Reason: ClaudeOAuthReasonStateUpdateFailed,
+			Scope:  GatewayFailureScopeAccount,
+			cause:  snapshotErr,
+		}
+	}
 	result, err := p.refreshAPI.RefreshAfterAccessTokenRejected(
 		withOAuthRefreshRequestPath(ctx),
 		account,
@@ -188,19 +198,81 @@ func (p *ClaudeTokenProvider) RefreshAfterAuthFailure(ctx context.Context, accou
 		rejectedAccessToken,
 	)
 	if err != nil {
-		return "", err
+		return p.handleAuthRecoveryRefreshFailure(ctx, account, expectedCredentials, rejectedAccessToken, err)
 	}
 	if result == nil {
-		return "", errors.New("claude oauth refresh returned no result")
+		return "", classifyClaudeOAuthRefreshFailure(errors.New("claude oauth refresh returned no result"))
 	}
 	if result.LockHeld {
 		return p.waitForReplacementAccessToken(ctx, account, rejectedAccessToken)
 	}
 	if result.Account == nil {
-		return "", errors.New("claude oauth refresh returned no account")
+		return "", classifyClaudeOAuthRefreshFailure(errors.New("claude oauth refresh returned no account"))
 	}
 
 	return p.publishReplacementAccessToken(ctx, result.Account, rejectedAccessToken)
+}
+
+func (p *ClaudeTokenProvider) handleAuthRecoveryRefreshFailure(
+	ctx context.Context,
+	account *Account,
+	expectedCredentials map[string]any,
+	rejectedAccessToken string,
+	refreshErr error,
+) (string, error) {
+	recoveryErr := classifyClaudeOAuthRefreshFailure(refreshErr)
+	if recoveryErr == nil || !recoveryErr.ReauthRequired {
+		return "", recoveryErr
+	}
+
+	conditionalRepo, ok := p.accountRepo.(claudeOAuthAuthFailureRepository)
+	if !ok {
+		return "", &ClaudeOAuthAuthRecoveryError{
+			Reason:         ClaudeOAuthReasonStateUpdateFailed,
+			Scope:          GatewayFailureScopeAccount,
+			ReauthRequired: true,
+			cause:          errors.New("account repository does not support conditional claude oauth quarantine"),
+		}
+	}
+	applied, setErr := conditionalRepo.SetClaudeOAuthErrorIfCredentialsUnchanged(
+		ctx,
+		account.ID,
+		expectedCredentials,
+		string(recoveryErr.Reason),
+		claudeOAuthReauthRequiredMessage,
+	)
+	if setErr != nil {
+		return "", &ClaudeOAuthAuthRecoveryError{
+			Reason:         ClaudeOAuthReasonStateUpdateFailed,
+			Scope:          GatewayFailureScopeAccount,
+			ReauthRequired: true,
+			cause:          setErr,
+		}
+	}
+	if applied {
+		invalidateClaudeAccessTokenDetached(p.tokenCache, account)
+		recoveryErr.Quarantined = true
+		return "", recoveryErr
+	}
+
+	// A concurrent reauthorization may have replaced the complete credential
+	// document after this request observed the rejected token. Reuse the newer
+	// access token rather than overwriting or quarantining the account.
+	if p.accountRepo != nil {
+		freshAccount, readErr := p.accountRepo.GetByID(ctx, account.ID)
+		if readErr == nil && freshAccount != nil {
+			freshToken := strings.TrimSpace(freshAccount.GetCredential("access_token"))
+			if freshToken != "" && freshToken != rejectedAccessToken && freshAccount.Status == StatusActive && freshAccount.Schedulable {
+				return p.publishReplacementAccessToken(ctx, freshAccount, rejectedAccessToken)
+			}
+		}
+	}
+	return "", &ClaudeOAuthAuthRecoveryError{
+		Reason:         ClaudeOAuthReasonAccountStateChanged,
+		Scope:          GatewayFailureScopeAccount,
+		ReauthRequired: true,
+		cause:          refreshErr,
+	}
 }
 
 func (p *ClaudeTokenProvider) waitForReplacementAccessToken(ctx context.Context, account *Account, rejectedAccessToken string) (string, error) {

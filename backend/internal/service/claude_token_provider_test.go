@@ -25,6 +25,7 @@ type claudeTokenCacheStub struct {
 	releaseLockErr   error
 	getCalled        int32
 	setCalled        int32
+	deleteCalled     int32
 	lockCalled       int32
 	unlockCalled     int32
 	simulateLockRace bool
@@ -59,6 +60,7 @@ func (s *claudeTokenCacheStub) SetAccessToken(ctx context.Context, cacheKey stri
 }
 
 func (s *claudeTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey string) error {
+	atomic.AddInt32(&s.deleteCalled, 1)
 	if s.deleteErr != nil {
 		return s.deleteErr
 	}
@@ -936,6 +938,100 @@ func TestClaudeTokenProvider_Real_NilCredentials(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "access_token not found")
 	require.Empty(t, token)
+}
+
+type claudeAuthFailureRepoStub struct {
+	*refreshAPIAccountRepo
+	quarantineApplied bool
+	quarantineErr     error
+	quarantineCalls   int
+	lastReason        string
+	lastErrorMessage  string
+}
+
+func (r *claudeAuthFailureRepoStub) SetClaudeOAuthErrorIfCredentialsUnchanged(
+	_ context.Context,
+	_ int64,
+	_ map[string]any,
+	reason string,
+	errorMessage string,
+) (bool, error) {
+	r.quarantineCalls++
+	r.lastReason = reason
+	r.lastErrorMessage = errorMessage
+	return r.quarantineApplied, r.quarantineErr
+}
+
+func TestClaudeTokenProviderRefreshAfterAuthFailureQuarantinesPermanentInvalidGrant(t *testing.T) {
+	account := &Account{
+		ID:          904,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"access_token":  "rejected-token",
+			"refresh_token": "invalid-refresh-token",
+			"expires_at":    time.Now().Add(time.Hour),
+		},
+	}
+	repo := &claudeAuthFailureRepoStub{
+		refreshAPIAccountRepo: &refreshAPIAccountRepo{account: account},
+		quarantineApplied:     true,
+	}
+	cache := newClaudeTokenCacheStub()
+	cache.tokens[ClaudeTokenCacheKey(account)] = "rejected-token"
+	executor := &refreshAPIExecutorStub{err: errors.New("oauth error: invalid_grant")}
+	provider := NewClaudeTokenProvider(repo, cache, nil)
+	provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), executor)
+
+	token, err := provider.RefreshAfterAuthFailure(context.Background(), account, "rejected-token")
+
+	require.Empty(t, token)
+	var recoveryErr *ClaudeOAuthAuthRecoveryError
+	require.ErrorAs(t, err, &recoveryErr)
+	require.Equal(t, ClaudeOAuthReasonRefreshTokenInvalid, recoveryErr.Reason)
+	require.True(t, recoveryErr.ReauthRequired)
+	require.True(t, recoveryErr.Quarantined)
+	require.Equal(t, 1, repo.quarantineCalls)
+	require.Equal(t, string(ClaudeOAuthReasonRefreshTokenInvalid), repo.lastReason)
+	require.Equal(t, claudeOAuthReauthRequiredMessage, repo.lastErrorMessage)
+	require.Equal(t, int32(1), atomic.LoadInt32(&cache.deleteCalled))
+	require.Empty(t, cache.tokens[ClaudeTokenCacheKey(account)])
+}
+
+func TestClaudeOAuthRecoveryFailoverStopsOnProviderConfiguration(t *testing.T) {
+	recoveryErr := classifyClaudeOAuthRefreshFailure(errors.New("oauth error: invalid_client"))
+	failoverErr := claudeOAuthRecoveryFailoverError(recoveryErr)
+
+	require.Equal(t, GatewayFailureStageAccountAuth, failoverErr.Stage)
+	require.Equal(t, GatewayFailureScopeProvider, failoverErr.Scope)
+	require.Equal(t, ClaudeOAuthReasonProviderConfig, failoverErr.Reason)
+	require.Equal(t, NextAccountStop, failoverErr.NextAccountAction)
+	require.False(t, failoverErr.ShouldRetryNextAccount())
+}
+
+func TestClassifyClaudeOAuthRefreshFailure(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            string
+		reason         GatewayFailureReason
+		scope          GatewayFailureScope
+		reauthRequired bool
+	}{
+		{"invalid grant is account permanent", "oauth error: invalid_grant", ClaudeOAuthReasonRefreshTokenInvalid, GatewayFailureScopeAccount, true},
+		{"missing refresh token is account permanent", "no refresh token available", ClaudeOAuthReasonRefreshTokenMissing, GatewayFailureScopeAccount, true},
+		{"invalid client is provider scoped", "invalid_client", ClaudeOAuthReasonProviderConfig, GatewayFailureScopeProvider, false},
+		{"transport is transient", "dial tcp timeout", ClaudeOAuthReasonRefreshTransient, GatewayFailureScopeAccount, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyClaudeOAuthRefreshFailure(errors.New(tt.err))
+			require.Equal(t, tt.reason, got.Reason)
+			require.Equal(t, tt.scope, got.Scope)
+			require.Equal(t, tt.reauthRequired, got.ReauthRequired)
+		})
+	}
 }
 
 func TestClaudeTokenProviderRefreshAfterAuthFailurePublishesReplacement(t *testing.T) {

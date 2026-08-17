@@ -12,14 +12,18 @@ import (
 const maxRedactDepth = 32
 
 var defaultSensitiveKeys = map[string]struct{}{
-	"authorization_code": {},
-	"code":               {},
-	"code_verifier":      {},
-	"access_token":       {},
-	"refresh_token":      {},
-	"id_token":           {},
-	"client_secret":      {},
-	"password":           {},
+	"authorization_code":  {},
+	"code":                {},
+	"code_verifier":       {},
+	"access_token":        {},
+	"refresh_token":       {},
+	"id_token":            {},
+	"client_secret":       {},
+	"password":            {},
+	"authorization":       {},
+	"proxy-authorization": {},
+	"cookie":              {},
+	"set-cookie":          {},
 }
 
 var defaultSensitiveKeyList = []string{
@@ -31,6 +35,10 @@ var defaultSensitiveKeyList = []string{
 	"id_token",
 	"client_secret",
 	"password",
+	"authorization",
+	"proxy-authorization",
+	"cookie",
+	"set-cookie",
 }
 
 type textRedactPatterns struct {
@@ -40,8 +48,11 @@ type textRedactPatterns struct {
 }
 
 var (
-	reGOCSPX = regexp.MustCompile(`GOCSPX-[0-9A-Za-z_-]{24,}`)
-	reAIza   = regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)
+	reGOCSPX       = regexp.MustCompile(`GOCSPX-[0-9A-Za-z_-]{24,}`)
+	reAIza         = regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)
+	reAuthHeader   = regexp.MustCompile(`(?im)\b(authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[^\s,;]+`)
+	reCookieHeader = regexp.MustCompile(`(?im)\b(cookie|set-cookie)\s*:\s*[^\r\n]+`)
+	reBearerToken  = regexp.MustCompile(`(?i)\b(bearer\s+)[0-9a-z._~+\/=-]+`)
 
 	defaultTextRedactPatterns = compileTextRedactPatterns(nil)
 	extraTextPatternCache     sync.Map // map[string]*textRedactPatterns
@@ -99,6 +110,9 @@ func RedactText(input string, extraKeys ...string) string {
 	out := input
 	out = reGOCSPX.ReplaceAllString(out, "GOCSPX-***")
 	out = reAIza.ReplaceAllString(out, "AIza***")
+	out = reAuthHeader.ReplaceAllString(out, `$1: ***`)
+	out = reCookieHeader.ReplaceAllString(out, `$1: ***`)
+	out = reBearerToken.ReplaceAllString(out, `$1***`)
 	out = patterns.reJSONLike.ReplaceAllString(out, `$1***$3`)
 	out = patterns.reQueryLike.ReplaceAllString(out, `$1=***`)
 	out = patterns.rePlain.ReplaceAllString(out, `$1$2***`)

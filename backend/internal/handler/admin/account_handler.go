@@ -1455,6 +1455,20 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		}
 	}
 
+	// Successful re-auth clears the Claude OAuth quarantine marker.
+	if existing.Platform == service.PlatformAnthropic {
+		if clearErr := h.adminService.UpdateAccountExtra(ctx, accountID, map[string]any{
+			"claude_needs_reauth":        false,
+			"claude_needs_reauth_reason": "",
+			"claude_needs_reauth_at":     "",
+		}); clearErr != nil {
+			slog.Warn("apply_oauth_credentials.clear_claude_reauth_failed",
+				"account_id", accountID,
+				"err", clearErr,
+			)
+		}
+	}
+
 	// Successful re-auth clears the soft spending-limit reauth flag for Grok.
 	if existing.Platform == service.PlatformGrok {
 		if clearErr := h.adminService.UpdateAccountExtra(ctx, accountID, map[string]any{

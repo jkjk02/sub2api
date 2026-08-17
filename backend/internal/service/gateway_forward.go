@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 
 	"github.com/gin-gonic/gin"
 )
@@ -452,10 +453,28 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 						continue
 					}
 					if refreshErr != nil {
+						var recoveryErr *ClaudeOAuthAuthRecoveryError
+						if errors.As(refreshErr, &recoveryErr) {
+							failoverErr := claudeOAuthRecoveryFailoverError(recoveryErr)
+							appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+								Platform:           account.Platform,
+								AccountID:          account.ID,
+								AccountName:        account.Name,
+								UpstreamStatusCode: resp.StatusCode,
+								UpstreamRequestID:  resp.Header.Get("x-request-id"),
+								Kind:               "credential_recovery",
+								Stage:              string(failoverErr.Stage),
+								Scope:              string(failoverErr.Scope),
+								Reason:             string(failoverErr.Reason),
+								Message:            failoverErr.ClientMessage,
+							})
+							_ = resp.Body.Close()
+							return nil, failoverErr
+						}
 						slog.Warn("claude_oauth_auth_recovery_failed",
 							"account_id", account.ID,
 							"upstream_status", resp.StatusCode,
-							"error", refreshErr,
+							"error", logredact.RedactText(refreshErr.Error()),
 						)
 					}
 				}

@@ -1448,6 +1448,71 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 	return true, nil
 }
 
+// SetClaudeOAuthErrorIfCredentialsUnchanged atomically quarantines an Anthropic
+// OAuth account whose refresh credential is permanently invalid. The complete
+// credential JSON is compared in the same UPDATE as the status transition so a
+// concurrent reauthorization can never be overwritten by a stale request.
+func (r *accountRepository) SetClaudeOAuthErrorIfCredentialsUnchanged(
+	ctx context.Context,
+	id int64,
+	expectedCredentials map[string]any,
+	reason string,
+	errorMessage string,
+) (bool, error) {
+	if r == nil || r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	if err != nil {
+		return false, err
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		WITH updated AS (
+		UPDATE accounts AS a
+		SET status = $1,
+			error_message = $2,
+			extra = COALESCE(a.extra, '{}'::jsonb) || jsonb_build_object(
+				'claude_needs_reauth', TRUE,
+				'claude_needs_reauth_reason', $3,
+				'claude_needs_reauth_at', NOW()
+			),
+			updated_at = NOW()
+		WHERE a.id = $4
+			AND a.deleted_at IS NULL
+			AND a.platform = $5
+			AND a.type = $6
+			AND a.status = $7
+			AND a.schedulable IS TRUE
+			AND a.credentials = $8::jsonb
+		RETURNING a.id
+		)
+		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
+		SELECT $9, updated.id, NULL, NULL FROM updated
+	`,
+		service.StatusError,
+		errorMessage,
+		reason,
+		id,
+		service.PlatformAnthropic,
+		service.AccountTypeOAuth,
+		service.StatusActive,
+		string(expectedJSON),
+		service.SchedulerOutboxEventAccountChanged,
+	)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rowsAffected == 0 {
+		return false, nil
+	}
+	r.syncSchedulerAccountSnapshotDetached(ctx, id)
+	return true, nil
+}
+
 // UpdateGrokOAuthCredentialsIfUnchanged persists provider-issued replacement
 // credentials only while the complete Grok OAuth credential document and
 // proxy still match the fresh snapshot used by the upstream refresh call. The
