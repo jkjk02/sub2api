@@ -165,7 +165,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 非 OAuth (API Key) + cli_mode: 若配置允许则也注入 CLI 特征 headers
 	shouldInjectCLIHeaders := (tokenType == "oauth" && mimicClaudeCode) ||
 		(tokenType != "oauth" && mimicClaudeCode &&
-			s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+			s.legacyAPIKeyCLISimulationEnabled() &&
 			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
@@ -529,7 +529,7 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 	if clientBeta != "" {
 		return stripBetaTokensWithSet(clientBeta, effectiveDropSet), true
 	}
-	if mimicClaudeCode && s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled &&
+	if mimicClaudeCode && s.legacyAPIKeyCLISimulationEnabled() &&
 		s.cfg.Gateway.CliSimulation.ForceCLIBetaForAPIKey {
 		header := claude.APIKeyBetaHeader
 		if strings.Contains(strings.ToLower(modelID), "haiku") {
@@ -550,7 +550,7 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 
 // mergeExtraBetaTokens 合并配置文件 gateway.cli_simulation.extra_beta_tokens 中的额外 beta token
 func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
-	if s.cfg == nil || len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens) == 0 {
+	if !s.legacyCLIProtocolEnabled() || len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens) == 0 {
 		return base
 	}
 	seen := make(map[string]struct{}, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
@@ -576,7 +576,7 @@ func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
 
 // getEffectiveCacheControlTTL returns the configured cache_control TTL override.
 func (s *GatewayService) getEffectiveCacheControlTTL() string {
-	if s.cfg != nil && s.cfg.Gateway.CliSimulation.CacheControlTTLOverride != "" {
+	if s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.CacheControlTTLOverride != "" {
 		return s.cfg.Gateway.CliSimulation.CacheControlTTLOverride
 	}
 	return claude.DefaultCacheControlTTL

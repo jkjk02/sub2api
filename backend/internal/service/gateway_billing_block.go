@@ -28,6 +28,13 @@ func SetFingerprintSalt(s string) {
 // 算法来自 Parrot src/transform/cc_mimicry.py:compute_fingerprint，与官方 CLI 字节对齐。
 // 任何偏差都会导致 cc_version=X.Y.Z.{fp} 在上游侧与真实 CLI 不一致。
 func computeClaudeCodeFingerprint(body []byte, version string) string {
+	return computeClaudeCodeFingerprintWithSalt(body, version, fingerprintSalt)
+}
+
+func computeClaudeCodeFingerprintWithSalt(body []byte, version string, salt string) string {
+	if salt == "" {
+		salt = fingerprintSalt
+	}
 	firstText := extractFirstUserText(body)
 	indices := []int{4, 7, 20}
 	chars := make([]byte, 0, 3)
@@ -38,7 +45,7 @@ func computeClaudeCodeFingerprint(body []byte, version string) string {
 			chars = append(chars, '0')
 		}
 	}
-	sum := sha256.Sum256([]byte(fingerprintSalt + string(chars) + version))
+	sum := sha256.Sum256([]byte(salt + string(chars) + version))
 	return hex.EncodeToString(sum[:])[:3]
 }
 
@@ -88,10 +95,14 @@ func extractFirstUserText(body []byte) string {
 // 此 block 不带 cache_control（与真实 CLI 一致；cache breakpoint 由后续的
 // Claude Code prompt block 承担）。
 func buildBillingAttributionText(body []byte, cliVersion string) (string, error) {
+	return buildBillingAttributionTextWithSalt(body, cliVersion, fingerprintSalt)
+}
+
+func buildBillingAttributionTextWithSalt(body []byte, cliVersion string, salt string) (string, error) {
 	if cliVersion == "" {
 		return "", fmt.Errorf("cliVersion required")
 	}
-	fp := computeClaudeCodeFingerprint(body, cliVersion)
+	fp := computeClaudeCodeFingerprintWithSalt(body, cliVersion, salt)
 	return fmt.Sprintf(
 		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli;",
 		cliVersion, fp,

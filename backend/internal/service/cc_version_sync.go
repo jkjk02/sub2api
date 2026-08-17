@@ -10,74 +10,105 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 )
 
-// npmRegistryLatestURL is the npm registry URL for the latest version
+// npmRegistryLatestURL is the npm registry URL for the latest version.
 const npmRegistryLatestURL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 
 // npmVersionTTL is how long a fetched version remains valid before a refresh.
 const npmVersionTTL = 2 * time.Hour
 
-// cliVersionSyncOnce guards the lazy start of the background npm sync loop so it
-// only spins up once per process regardless of how many requests race in.
-var cliVersionSyncOnce sync.Once
+type cliVersionRuntime struct {
+	startOnce     sync.Once
+	overridesOnce sync.Once
+	client        *http.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	syncedVersion atomic.Value // string
+}
 
-// cliOverridesOnce guards the one-time application of config-driven overrides
-// (cc_version_override / cache_control_ttl / fingerprint_salt) to their
-// package-level sinks so that every code path reads the overridden value.
-var cliOverridesOnce sync.Once
+func newCLIVersionRuntime() *cliVersionRuntime {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cliVersionRuntime{
+		client: &http.Client{Timeout: 10 * time.Second},
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
 
-// applyCliSimulationOverrides pushes config overrides into their package-level
-// sinks exactly once. Without this the *_override config keys were dead knobs.
+func (s *GatewayService) getCLIVersionRuntime() *cliVersionRuntime {
+	if s == nil {
+		return nil
+	}
+	s.cliVersionRuntimeOnce.Do(func() {
+		s.cliVersionRuntime = newCLIVersionRuntime()
+	})
+	return s.cliVersionRuntime
+}
+
+// applyCliSimulationOverrides records service-scoped override activation once.
+// Request-critical values are read from this GatewayService's config instead of
+// mutating package globals, so multiple service instances cannot contaminate each other.
 func (s *GatewayService) applyCliSimulationOverrides() {
-	if s == nil || s.cfg == nil {
+	if !s.legacyCLIProtocolEnabled() {
 		return
 	}
-	cliOverridesOnce.Do(func() {
+	runtime := s.getCLIVersionRuntime()
+	if runtime == nil {
+		return
+	}
+	runtime.overridesOnce.Do(func() {
 		sim := s.cfg.Gateway.CliSimulation
 		if sim.CCVersionOverride != "" {
-			claude.SetCLIVersionOverride(sim.CCVersionOverride)
-			slog.Info("cli simulation: cc version override applied", "version", sim.CCVersionOverride)
+			slog.Info("cli simulation: cc version override active", "version", sim.CCVersionOverride)
 		}
 		if sim.CacheControlTTLOverride != "" {
-			claude.SetCacheControlTTL(sim.CacheControlTTLOverride)
-			slog.Info("cli simulation: cache_control ttl override applied", "ttl", sim.CacheControlTTLOverride)
+			slog.Info("cli simulation: cache_control ttl override active", "ttl", sim.CacheControlTTLOverride)
 		}
 		if sim.FingerprintSaltOverride != "" {
-			SetFingerprintSalt(sim.FingerprintSaltOverride)
-			slog.Info("cli simulation: fingerprint salt override applied")
+			slog.Info("cli simulation: fingerprint salt override active")
 		}
 		if sp := strings.TrimSpace(sim.SystemPromptStaticOverride); sp != "" {
-			claudeCodeSystemPromptExpansion = sp
-			slog.Info("cli simulation: system prompt static override applied", "len", len(sp))
+			slog.Info("cli simulation: system prompt static override active", "len", len(sp))
 		}
 	})
 }
 
-// ensureCLIVersionSync lazily starts the background npm version sync loop and
-// applies config overrides. Safe to call on every request (cheap after first).
-func (s *GatewayService) ensureCLIVersionSync(ctx context.Context) {
-	if s == nil || s.cfg == nil {
+// ensureCLIVersionSync lazily starts one background npm version sync loop per
+// GatewayService. The worker is owned by the service rather than a request context.
+func (s *GatewayService) ensureCLIVersionSync(_ context.Context) {
+	if !s.legacyCLIProtocolEnabled() {
 		return
 	}
 	s.applyCliSimulationOverrides()
-	// An explicit override pins the version; no need to poll npm.
-	if s.cfg.Gateway.CliSimulation.CCVersionOverride != "" {
+	if strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride) != "" {
 		return
 	}
-	cliVersionSyncOnce.Do(func() {
-		// Detach from the request context so the loop outlives the request.
-		go s.startCLIVersionSyncLoop(context.WithoutCancel(ctx))
+	runtime := s.getCLIVersionRuntime()
+	if runtime == nil {
+		return
+	}
+	runtime.startOnce.Do(func() {
+		go s.startCLIVersionSyncLoop(runtime.ctx)
 	})
+}
+
+// StopCLIVersionSync cancels the service-owned npm synchronization worker.
+// It is idempotent and safe even when synchronization was never started.
+func (s *GatewayService) StopCLIVersionSync() {
+	if runtime := s.getCLIVersionRuntime(); runtime != nil {
+		runtime.cancel()
+	}
 }
 
 // startCLIVersionSyncLoop fetches the latest CC version immediately and then
 // refreshes it every npmVersionTTL. Failures are logged and retried next tick.
 func (s *GatewayService) startCLIVersionSyncLoop(ctx context.Context) {
-	if _, err := s.SyncCLIVersion(ctx); err != nil {
+	if _, err := s.SyncCLIVersion(ctx); err != nil && ctx.Err() == nil {
 		slog.Warn("cli version initial sync failed", "err", err)
 	}
 	ticker := time.NewTicker(npmVersionTTL)
@@ -87,7 +118,7 @@ func (s *GatewayService) startCLIVersionSyncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := s.SyncCLIVersion(ctx); err != nil {
+			if _, err := s.SyncCLIVersion(ctx); err != nil && ctx.Err() == nil {
 				slog.Warn("cli version refresh failed", "err", err)
 			}
 		}
@@ -95,16 +126,15 @@ func (s *GatewayService) startCLIVersionSyncLoop(ctx context.Context) {
 }
 
 // SyncCLIVersion fetches the latest Claude Code version from the npm registry
-// and updates the in-memory synced version. Returns the version string.
-//
-// Unlike the previous implementation this always performs the fetch (the caller
-// controls cadence via the ticker), so a long-running process picks up upstream
-// version bumps instead of freezing on the first value forever.
+// and updates this service's in-memory synced version.
 func (s *GatewayService) SyncCLIVersion(ctx context.Context) (string, error) {
-	if s.cfg != nil && s.cfg.Gateway.CliSimulation.CCVersionOverride != "" {
-		v := s.cfg.Gateway.CliSimulation.CCVersionOverride
-		claude.SetCLIVersionOverride(v)
-		return v, nil
+	if s == nil {
+		return "", fmt.Errorf("gateway service required")
+	}
+	if s.legacyCLIProtocolEnabled() {
+		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+			return v, nil
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, npmRegistryLatestURL, nil)
@@ -112,8 +142,8 @@ func (s *GatewayService) SyncCLIVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("create npm request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	runtime := s.getCLIVersionRuntime()
+	resp, err := runtime.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch npm registry: %w", err)
 	}
@@ -134,48 +164,52 @@ func (s *GatewayService) SyncCLIVersion(ctx context.Context) (string, error) {
 	if err := json.Unmarshal(body, &pkg); err != nil {
 		return "", fmt.Errorf("parse npm response: %w", err)
 	}
+	pkg.Version = strings.TrimSpace(pkg.Version)
 	if pkg.Version == "" {
 		return "", fmt.Errorf("npm response missing version field")
 	}
 
-	claude.SetSyncedCLIVersion(pkg.Version)
+	runtime.syncedVersion.Store(pkg.Version)
 	slog.Info("cli version synced from npm registry", "version", pkg.Version)
 	return pkg.Version, nil
 }
 
-// GetEffectiveCLIVersion returns the process-wide effective CC version
-// (override > synced > compile-time constant). It does NOT apply per-account
-// version-pool diversity; use resolveAccountCLIVersion for the per-request value.
+// GetEffectiveCLIVersion returns this service's effective CC version
+// (service config override > service-synced value > compile-time constant).
 func (s *GatewayService) GetEffectiveCLIVersion() string {
-	return claude.EffectiveCLIVersion()
-}
-
-// resolveAccountCLIVersion returns the CC version for THIS account's requests.
-// It is the single source of truth that MUST be used for both the User-Agent and
-// the billing attribution block (cc_version=...); a mismatch between the two is a
-// strong third-party tell.
-//
-// Priority:
-//  1. config override (cc_version_override) — pins everyone to one version
-//  2. per-account version pool — deterministic by account ID (stable across
-//     requests, spread across the pool between accounts)
-//  3. process-wide effective version (synced npm value or compile-time constant)
-func (s *GatewayService) resolveAccountCLIVersion(account *Account) string {
-	if v := claude.GetCLIVersionOverride(); v != "" {
-		return v
-	}
-	if s.cfg != nil && account != nil {
-		if pool := s.cfg.Gateway.CliSimulation.CCVersionPool; len(pool) > 0 {
-			return pool[stableIndexForAccount(account.ID, len(pool))]
+	if s != nil && s.legacyCLIProtocolEnabled() {
+		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+			return v
+		}
+		if runtime := s.getCLIVersionRuntime(); runtime != nil {
+			if v, ok := runtime.syncedVersion.Load().(string); ok && v != "" {
+				return v
+			}
 		}
 	}
-	return claude.EffectiveCLIVersion()
+	return claude.CLICurrentVersion
 }
 
-// resolveAccountOSArch returns the OS/Arch pair for THIS account. An explicit
-// per-account cli_os/cli_arch wins; otherwise a deterministic pick from the
-// configured OSArchPool (stable per account). Empty strings mean "leave the
-// process default in place".
+// resolveAccountCLIVersion returns the CC version for this account's requests.
+// Priority: service override, stable account pool, service-synced value, constant.
+func (s *GatewayService) resolveAccountCLIVersion(account *Account) string {
+	if s != nil && s.legacyCLIProtocolEnabled() {
+		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+			return v
+		}
+		if account != nil {
+			if pool := s.cfg.Gateway.CliSimulation.CCVersionPool; len(pool) > 0 {
+				if v := strings.TrimSpace(pool[stableIndexForAccount(account.ID, len(pool))]); v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return s.GetEffectiveCLIVersion()
+}
+
+// resolveAccountOSArch returns the OS/Arch pair for this account. Explicit
+// account values win; the configured diversity pool is legacy-protocol only.
 func (s *GatewayService) resolveAccountOSArch(account *Account) (osName, arch string) {
 	if account == nil {
 		return "", ""
@@ -184,7 +218,7 @@ func (s *GatewayService) resolveAccountOSArch(account *Account) (osName, arch st
 	if osName != "" && arch != "" {
 		return osName, arch
 	}
-	if s.cfg != nil {
+	if s != nil && s.legacyCLIProtocolEnabled() {
 		if pool := s.cfg.Gateway.CliSimulation.OSArchPool; len(pool) > 0 {
 			entry := pool[stableIndexForAccount(account.ID, len(pool))]
 			if osName == "" {
@@ -198,9 +232,7 @@ func (s *GatewayService) resolveAccountOSArch(account *Account) (osName, arch st
 	return osName, arch
 }
 
-// stableIndexForAccount maps an account ID to a stable index in [0,n) so the same
-// account always lands on the same pool entry (mimicking a single real user whose
-// OS/version does not change every request) while different accounts spread out.
+// stableIndexForAccount maps an account ID to a stable index in [0,n).
 func stableIndexForAccount(accountID int64, n int) int {
 	if n <= 1 {
 		return 0
@@ -215,11 +247,23 @@ func stableIndexForAccount(accountID int64, n int) int {
 	return int(h.Sum32() % uint32(n))
 }
 
-// GetEffectiveFingerprintSalt returns the effective billing fingerprint salt
-// (config override or the built-in default).
+// GetEffectiveFingerprintSalt returns this service's effective billing salt.
 func (s *GatewayService) GetEffectiveFingerprintSalt() string {
-	if s.cfg != nil && s.cfg.Gateway.CliSimulation.FingerprintSaltOverride != "" {
-		return s.cfg.Gateway.CliSimulation.FingerprintSaltOverride
+	if s != nil && s.legacyCLIProtocolEnabled() {
+		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.FingerprintSaltOverride); v != "" {
+			return v
+		}
 	}
 	return fingerprintSalt
+}
+
+// getEffectiveSystemPromptExpansion returns the service-scoped static prompt
+// override when legacy synthesis is active, otherwise the built-in default.
+func (s *GatewayService) getEffectiveSystemPromptExpansion() string {
+	if s != nil && s.legacyCLIProtocolEnabled() {
+		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.SystemPromptStaticOverride); v != "" {
+			return v
+		}
+	}
+	return claudeCodeSystemPromptExpansion
 }

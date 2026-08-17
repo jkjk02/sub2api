@@ -273,7 +273,10 @@ gateway:
   # CLI simulation settings for account-specific request identity.
   # CLI 模拟配置；仅对明确开启 cli_mode 的账号生效。
   cli_simulation:
-    # Enable API-key CLI simulation globally.
+    # Protocol mode: legacy preserves historical synthesis; passthrough disables fork-specific mutation.
+    # Empty/unknown values default to legacy for backward compatibility.
+    protocol_mode: "legacy"
+    # Enable API-key CLI simulation globally (effective only in legacy mode).
     enabled: false
     # Force the Claude Code beta set when a cli_mode API-key request has no anthropic-beta header.
     force_cli_beta_for_apikey: false

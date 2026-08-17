@@ -389,7 +389,7 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 	systemRewritten := false
 	if systemPromptInjectionEnabled {
-		body = rewriteSystemForNonClaudeCodeWithPromptBlocks(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))
+		body = s.rewriteSystemForNonClaudeCodeWithPromptBlocks(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))
 		systemRewritten = true
 	}
 
@@ -722,14 +722,21 @@ func parseClaudeOAuthSystemPromptBlocksConfig(raw string) ([]claudeOAuthSystemPr
 }
 
 func decodeClaudeOAuthSystemPromptCacheControl(raw json.RawMessage) (any, error) {
+	return decodeClaudeOAuthSystemPromptCacheControlWithTTL(raw, claude.DefaultCacheControlTTL)
+}
+
+func decodeClaudeOAuthSystemPromptCacheControlWithTTL(raw json.RawMessage, ttl string) (any, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("false")) {
 		return nil, nil
 	}
 	if bytes.Equal(trimmed, []byte("true")) {
+		if strings.TrimSpace(ttl) == "" {
+			ttl = claude.DefaultCacheControlTTL
+		}
 		return map[string]string{
 			"type": "ephemeral",
-			"ttl":  claude.DefaultCacheControlTTL,
+			"ttl":  ttl,
 		}, nil
 	}
 	var value any
@@ -743,6 +750,10 @@ func decodeClaudeOAuthSystemPromptCacheControl(raw json.RawMessage) (any, error)
 }
 
 func expandClaudeOAuthSystemPromptTextTemplate(body []byte, text string, expansionPrompt string, cliVersion string) (string, error) {
+	return expandClaudeOAuthSystemPromptTextTemplateWithSalt(body, text, expansionPrompt, cliVersion, fingerprintSalt)
+}
+
+func expandClaudeOAuthSystemPromptTextTemplateWithSalt(body []byte, text string, expansionPrompt string, cliVersion string, salt string) (string, error) {
 	if text == "" {
 		return "", nil
 	}
@@ -750,11 +761,11 @@ func expandClaudeOAuthSystemPromptTextTemplate(body []byte, text string, expansi
 		cliVersion = claude.EffectiveCLIVersion()
 	}
 	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
-	billingText, err := buildBillingAttributionText(body, cliVersion)
+	billingText, err := buildBillingAttributionTextWithSalt(body, cliVersion, salt)
 	if err != nil {
 		return "", err
 	}
-	fp := computeClaudeCodeFingerprint(body, cliVersion)
+	fp := computeClaudeCodeFingerprintWithSalt(body, cliVersion, salt)
 	replacer := strings.NewReplacer(
 		"{billing_header}", billingText,
 		"{cc_version}", cliVersion,
@@ -766,7 +777,14 @@ func expandClaudeOAuthSystemPromptTextTemplate(body []byte, text string, expansi
 }
 
 func defaultClaudeOAuthSystemPromptBlockConfig() []claudeOAuthSystemPromptBlockConfig {
+	return defaultClaudeOAuthSystemPromptBlockConfigWithTTL(claude.DefaultCacheControlTTL)
+}
+
+func defaultClaudeOAuthSystemPromptBlockConfigWithTTL(ttl string) []claudeOAuthSystemPromptBlockConfig {
 	enabled := true
+	if strings.TrimSpace(ttl) == "" {
+		ttl = claude.DefaultCacheControlTTL
+	}
 	return []claudeOAuthSystemPromptBlockConfig{
 		{
 			Enabled: &enabled,
@@ -783,19 +801,27 @@ func defaultClaudeOAuthSystemPromptBlockConfig() []claudeOAuthSystemPromptBlockC
 			Type:    "text",
 			Text:    "{claude_code_expansion_prompt}",
 			CacheControl: json.RawMessage(
-				fmt.Sprintf(`{"type":"ephemeral","ttl":%q}`, claude.DefaultCacheControlTTL),
+				fmt.Sprintf(`{"type":"ephemeral","ttl":%q}`, ttl),
 			),
 		},
 	}
 }
 
 func buildClaudeOAuthSystemPromptBlocksJSON(body []byte, expansionPrompt string, blocksConfig string, cliVersion string) ([][]byte, error) {
+	return buildClaudeOAuthSystemPromptBlocksJSONWithSalt(body, expansionPrompt, blocksConfig, cliVersion, fingerprintSalt)
+}
+
+func buildClaudeOAuthSystemPromptBlocksJSONWithSalt(body []byte, expansionPrompt string, blocksConfig string, cliVersion string, salt string) ([][]byte, error) {
+	return buildClaudeOAuthSystemPromptBlocksJSONWithSaltAndTTL(body, expansionPrompt, blocksConfig, cliVersion, salt, claude.DefaultCacheControlTTL)
+}
+
+func buildClaudeOAuthSystemPromptBlocksJSONWithSaltAndTTL(body []byte, expansionPrompt string, blocksConfig string, cliVersion string, salt string, ttl string) ([][]byte, error) {
 	blocks, err := parseClaudeOAuthSystemPromptBlocksConfig(blocksConfig)
 	if err != nil {
 		return nil, err
 	}
 	if len(blocks) == 0 {
-		blocks = defaultClaudeOAuthSystemPromptBlockConfig()
+		blocks = defaultClaudeOAuthSystemPromptBlockConfigWithTTL(ttl)
 	}
 
 	items := make([][]byte, 0, len(blocks))
@@ -810,14 +836,14 @@ func buildClaudeOAuthSystemPromptBlocksJSON(body []byte, expansionPrompt string,
 		if blockType != "text" {
 			return nil, fmt.Errorf("system block %d type %q is not supported", i, block.Type)
 		}
-		text, err := expandClaudeOAuthSystemPromptTextTemplate(body, block.Text, expansionPrompt, cliVersion)
+		text, err := expandClaudeOAuthSystemPromptTextTemplateWithSalt(body, block.Text, expansionPrompt, cliVersion, salt)
 		if err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		cacheControl, err := decodeClaudeOAuthSystemPromptCacheControl(block.CacheControl)
+		cacheControl, err := decodeClaudeOAuthSystemPromptCacheControlWithTTL(block.CacheControl, ttl)
 		if err != nil {
 			return nil, fmt.Errorf("system block %d cache_control: %w", i, err)
 		}
@@ -884,6 +910,14 @@ func extractSystemTextAndCacheControl(system any) (string, any) {
 }
 
 func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expansionPrompt string, blocksConfig string, cliVersion string) []byte {
+	return rewriteSystemForNonClaudeCodeWithPromptBlocksAndSalt(body, system, expansionPrompt, blocksConfig, cliVersion, fingerprintSalt)
+}
+
+func rewriteSystemForNonClaudeCodeWithPromptBlocksAndSalt(body []byte, system any, expansionPrompt string, blocksConfig string, cliVersion string, salt string) []byte {
+	return rewriteSystemForNonClaudeCodeWithPromptBlocksAndSaltAndTTL(body, system, expansionPrompt, blocksConfig, cliVersion, salt, claude.DefaultCacheControlTTL)
+}
+
+func rewriteSystemForNonClaudeCodeWithPromptBlocksAndSaltAndTTL(body []byte, system any, expansionPrompt string, blocksConfig string, cliVersion string, salt string, ttl string) []byte {
 	system = normalizeSystemParam(system)
 	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
 
@@ -902,10 +936,10 @@ func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expa
 	//    缺失 billing block 的系统 payload 是 Anthropic 判定第三方的关键信号之一
 	//    （真实 CLI 每个请求都带）。新版 CLI 已取消 cch=... 签名字段，故 block 不再注入
 	//    cch（见 buildBillingAttributionText）。
-	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, blocksConfig, cliVersion)
+	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSONWithSaltAndTTL(body, expansionPrompt, blocksConfig, cliVersion, salt, ttl)
 	if blockErr != nil {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to build configured Claude OAuth system blocks: %v", blockErr)
-		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, "", cliVersion)
+		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSONWithSaltAndTTL(body, expansionPrompt, "", cliVersion, salt, ttl)
 	}
 	if blockErr != nil {
 		logger.LegacyPrintf("service.gateway", "Warning: failed to build default Claude OAuth system blocks: %v", blockErr)
@@ -1224,11 +1258,22 @@ func (s *GatewayService) normalizeClientDatelineIfEnabled(ctx context.Context, a
 	return next, true
 }
 
+func (s *GatewayService) rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expansionPrompt string, blocksConfig string, cliVersion string) []byte {
+	return rewriteSystemForNonClaudeCodeWithPromptBlocksAndSaltAndTTL(
+		body, system, expansionPrompt, blocksConfig, cliVersion,
+		s.GetEffectiveFingerprintSalt(), s.getEffectiveCacheControlTTL(),
+	)
+}
+
 func (s *GatewayService) claudeOAuthSystemPromptInjectionSettings(ctx context.Context) (bool, string, string) {
 	if s == nil || s.settingService == nil {
-		return true, "", ""
+		return true, s.getEffectiveSystemPromptExpansion(), ""
 	}
-	return s.settingService.GetClaudeOAuthSystemPromptInjectionSettings(ctx)
+	enabled, prompt, blocks := s.settingService.GetClaudeOAuthSystemPromptInjectionSettings(ctx)
+	if strings.TrimSpace(prompt) == "" {
+		prompt = s.getEffectiveSystemPromptExpansion()
+	}
+	return enabled, prompt, blocks
 }
 
 // systemHasBillingAttributionBlock 检查请求体的 system 字段中是否包含真实 Claude Code

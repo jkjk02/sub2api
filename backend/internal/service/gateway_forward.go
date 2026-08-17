@@ -189,8 +189,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 对于开启了 cli_mode 的非 OAuth 账号（API Key），允许注入 CLI 特征 headers，
 	// 但不执行 OAuth 特定的 body 改写（system prompt 注入、metadata 注入等）。
-	shouldSimulateCLIForAPIKey := account.IsCliMode() &&
-		s.cfg != nil && s.cfg.Gateway.CliSimulation.Enabled
+	shouldSimulateCLIForAPIKey := account.IsCliMode() && s.legacyAPIKeyCLISimulationEnabled()
 
 	if shouldMimicClaudeCode {
 		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
@@ -202,7 +201,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		systemRaw, _ := parsed.SystemValue()
 		systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
 		if systemPromptInjectionEnabled {
-			if err := replaceBody(rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))); err != nil {
+			if err := replaceBody(s.rewriteSystemForNonClaudeCodeWithPromptBlocks(body, systemRaw, systemPrompt, systemPromptBlocks, s.resolveAccountCLIVersion(account))); err != nil {
 				return nil, err
 			}
 			systemRewritten = true
@@ -329,7 +328,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 解析 TLS 指纹 profile（同一请求生命周期内不变，避免重试循环中重复解析）
 	tlsProfile := s.tlsFPProfileService.ResolveTLSProfile(account)
-	if s.cfg != nil && s.cfg.Gateway.CliSimulation.TLSProfilePoolSize > 1 && account != nil && account.IsCliMode() {
+	if s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.TLSProfilePoolSize > 1 && account != nil && account.IsCliMode() {
 		if profile := s.tlsFPProfileService.ResolveTLSProfileForAccount(account, s.cfg.Gateway.CliSimulation.TLSProfilePoolSize); profile != nil {
 			tlsProfile = profile
 		}
@@ -390,7 +389,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 		// 请求间延迟：模拟真人打字节奏，降低自动化检测风险（仅首次尝试，重试跳过）。
 		if attempt == 1 && (shouldMimicClaudeCode || shouldSimulateCLIForAPIKey) {
-			s.applyInterRequestDelay()
+			if err := s.applyInterRequestDelay(ctx); err != nil {
+				return nil, err
+			}
 		}
 
 		// 发送请求

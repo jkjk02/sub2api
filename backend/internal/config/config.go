@@ -1030,10 +1030,20 @@ type GatewayConfig struct {
 	Grok GatewayGrokConfig `mapstructure:"grok"`
 }
 
+const (
+	// CliSimulationProtocolModeLegacy preserves the fork's historical Claude Code synthesis.
+	CliSimulationProtocolModeLegacy = "legacy"
+	// CliSimulationProtocolModePassthrough disables fork-specific synthesis while retaining upstream behavior.
+	CliSimulationProtocolModePassthrough = "passthrough"
+)
+
 // CliSimulationConfig CLI 模拟配置。
 // 用于允许 API Key 等非 OAuth 账号在上游转发时注入 Claude Code CLI 特征
 // (User-Agent, x-stainless-*, x-app, anthropic-beta 等)，与已有 OAuth mimicry 对齐。
 type CliSimulationConfig struct {
+	// ProtocolMode controls whether fork-specific protocol synthesis is active.
+	// Empty and unknown values intentionally fall back to legacy for staged compatibility.
+	ProtocolMode string `mapstructure:"protocol_mode"`
 	// Enabled: 全局开关，控制是否允许非 OAuth 账号启用 CLI 模拟
 	Enabled bool `mapstructure:"enabled"`
 	// ForceCLIBetaForAPIKey: 即使客户端未携带 anthropic-beta，是否强制写入 APIKeyBetaHeader
@@ -1067,6 +1077,24 @@ type CliSimulationConfig struct {
 	// 且真实 Claude Code 的系统提示词长达 25K+ 字符且随版本变化。为获得最强匹配，建议
 	// 抓取你本机真实 `claude` CLI 发出的 system 静态段原文粘贴到此处（或走后台设置覆盖）。
 	SystemPromptStaticOverride string `mapstructure:"system_prompt_static_override"`
+}
+
+// EffectiveProtocolMode returns the normalized CLI simulation protocol mode.
+// Legacy is the compatibility default so an upgrade never silently changes wire behavior.
+func (c CliSimulationConfig) EffectiveProtocolMode() string {
+	switch strings.ToLower(strings.TrimSpace(c.ProtocolMode)) {
+	case CliSimulationProtocolModePassthrough:
+		return CliSimulationProtocolModePassthrough
+	case CliSimulationProtocolModeLegacy:
+		fallthrough
+	default:
+		return CliSimulationProtocolModeLegacy
+	}
+}
+
+// LegacySynthesisEnabled reports whether fork-specific Claude Code synthesis may run.
+func (c CliSimulationConfig) LegacySynthesisEnabled() bool {
+	return c.Enabled && c.EffectiveProtocolMode() == CliSimulationProtocolModeLegacy
 }
 
 // OSArchEntry represents an OS/Arch diversity entry for CLI simulation.
