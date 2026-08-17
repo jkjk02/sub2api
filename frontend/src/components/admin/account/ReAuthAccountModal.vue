@@ -127,6 +127,7 @@
         :session-id="currentSessionId"
         :loading="currentLoading"
         :error="currentError"
+        :cookie-auth-progress="cookieAuthProgress"
         :show-help="isAnthropic"
         :show-proxy-warning="isAnthropic"
         :show-cookie-option="isAnthropic"
@@ -207,6 +208,7 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
+import { maskSessionKey } from '@/utils/maskSessionKey'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -242,6 +244,7 @@ const grokOAuth = useGrokOAuth()
 
 // Refs
 const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
+const cookieAuthProgress = ref('')
 
 // State
 const addMethod = ref<AddMethod>('oauth')
@@ -571,8 +574,15 @@ const handleExchangeCode = async () => {
 const handleCookieAuth = async (sessionKey: string) => {
   if (!props.account || isOpenAILike.value) return
 
+  const normalizedSessionKey = sessionKey.trim()
+  const keyPreview = maskSessionKey(normalizedSessionKey)
   claudeOAuth.loading.value = true
   claudeOAuth.error.value = ''
+  cookieAuthProgress.value = t('admin.accounts.oauth.authorizingKey', {
+    current: 1,
+    total: 1,
+    key: keyPreview
+  })
 
   try {
     const proxyConfig = props.account.proxy_id ? { proxy_id: props.account.proxy_id } : {}
@@ -583,7 +593,7 @@ const handleCookieAuth = async (sessionKey: string) => {
 
     const tokenInfo = await adminAPI.accounts.exchangeCode(endpoint, {
       session_id: '',
-      code: sessionKey.trim(),
+      code: normalizedSessionKey,
       ...proxyConfig
     })
 
@@ -599,9 +609,12 @@ const handleCookieAuth = async (sessionKey: string) => {
     emit('reauthorized', updatedAccount)
     handleClose()
   } catch (error: any) {
-    claudeOAuth.error.value =
-      error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
+    claudeOAuth.error.value = t('admin.accounts.oauth.cookieAuthFailedForKey', {
+      key: keyPreview,
+      error: error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
+    })
   } finally {
+    cookieAuthProgress.value = ''
     claudeOAuth.loading.value = false
   }
 }

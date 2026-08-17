@@ -966,6 +966,7 @@ export default {
         cookieAutoAuthDesc:
           'Use claude.ai sessionKey to automatically complete OAuth authorization without manually opening browser.',
         sessionKey: 'sessionKey',
+        sessionKeyPreviewLabel: 'Key identifiers (first 4 and last 4 only)',
         keysCount: '{count} keys',
         batchCreateAccounts: 'Will batch create {count} accounts',
         sessionKeyPlaceholder:
@@ -981,6 +982,7 @@ export default {
         sessionKeyFormat: 'sessionKey usually starts with sk-ant-sid01-',
         startAutoAuth: 'Start Auto-Auth',
         authorizing: 'Authorizing...',
+        authorizingKey: 'Authorizing {current}/{total} · {key}',
         followSteps: 'Follow these steps to authorize your Claude account:',
         step1GenerateUrl: 'Click the button below to generate the authorization URL',
         generateAuthUrl: 'Generate Auth URL',
@@ -1002,7 +1004,8 @@ export default {
         pleaseEnterSessionKey: 'Please enter at least one valid sessionKey',
         authFailed: 'Authorization failed',
         cookieAuthFailed: 'Cookie authorization failed',
-        keyAuthFailed: 'Key {index}: {error}',
+        cookieAuthFailedForKey: 'Cookie authorization failed ({key}): {error}',
+        keyAuthFailed: 'Key {index} ({key}): {error}',
         successCreated: 'Successfully created {count} account(s)',
         batchSuccess: 'Successfully created {count} account(s)',
         batchPartialSuccess: 'Partial success: {success} succeeded, {failed} failed',

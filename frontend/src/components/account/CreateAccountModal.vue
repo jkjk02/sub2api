@@ -3347,6 +3347,7 @@
         :session-id="currentSessionId"
         :loading="currentOAuthLoading"
         :error="currentOAuthError"
+        :cookie-auth-progress="cookieAuthProgress"
         :show-help="form.platform === 'anthropic'"
         :show-proxy-warning="form.platform !== 'openai' && form.platform !== 'grok' && !!form.proxy_id"
         :allow-multiple="form.platform === 'anthropic'"
@@ -3753,6 +3754,7 @@ import {
 } from '@/components/account/credentialsBuilder'
 import { formatDateTimeLocalInput, parseDateTimeLocalInput } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { maskSessionKey } from '@/utils/maskSessionKey'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
   OPENAI_WS_MODE_CTX_POOL,
@@ -3863,6 +3865,7 @@ const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
+const cookieAuthProgress = ref('')
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
@@ -6627,10 +6630,18 @@ const handleCookieAuth = async (sessionKey: string) => {
     const errors: string[] = []
 
     for (let i = 0; i < keys.length; i++) {
+      const currentKey = keys[i]
+      const keyPreview = maskSessionKey(currentKey)
+      cookieAuthProgress.value = t('admin.accounts.oauth.authorizingKey', {
+        current: i + 1,
+        total: keys.length,
+        key: keyPreview
+      })
+
       try {
         const tokenInfo = await adminAPI.accounts.exchangeCode(endpoint, {
           session_id: '',
-          code: keys[i],
+          code: currentKey,
           ...proxyConfig
         })
 
@@ -6724,6 +6735,7 @@ const handleCookieAuth = async (sessionKey: string) => {
         errors.push(
           t('admin.accounts.oauth.keyAuthFailed', {
             index: i + 1,
+            key: keyPreview,
             error: error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
           })
         )
@@ -6746,6 +6758,7 @@ const handleCookieAuth = async (sessionKey: string) => {
   } catch (error: any) {
     oauth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
   } finally {
+    cookieAuthProgress.value = ''
     oauth.loading.value = false
   }
 }

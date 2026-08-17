@@ -576,6 +576,24 @@
                     : t('admin.accounts.oauth.sessionKeyPlaceholderSingle')
                 "
               ></textarea>
+              <div
+                v-if="sessionKeyPreviews.length > 0"
+                class="mt-2 rounded-md border border-blue-200 bg-blue-50/70 p-2 dark:border-blue-700 dark:bg-blue-950/30"
+              >
+                <p class="mb-1 text-xs text-blue-700 dark:text-blue-300">
+                  {{ t('admin.accounts.oauth.sessionKeyPreviewLabel') }}
+                </p>
+                <div class="max-h-28 space-y-1 overflow-y-auto font-mono text-xs">
+                  <div
+                    v-for="(preview, index) in sessionKeyPreviews"
+                    :key="`${index}-${preview}`"
+                    class="flex items-center gap-2 text-gray-700 dark:text-gray-300"
+                  >
+                    <span class="w-7 shrink-0 text-right text-gray-400">#{{ index + 1 }}</span>
+                    <code>{{ preview }}</code>
+                  </div>
+                </div>
+              </div>
               <p
                 v-if="parsedKeyCount > 1 && allowMultiple"
                 class="mt-1 text-xs text-blue-600 dark:text-blue-400"
@@ -648,7 +666,7 @@
               <Icon v-else name="sparkles" size="sm" class="mr-2" />
               {{
                 loading
-                  ? t('admin.accounts.oauth.authorizing')
+                  ? cookieAuthProgress || t('admin.accounts.oauth.authorizing')
                   : t('admin.accounts.oauth.startAutoAuth')
               }}
             </button>
@@ -901,6 +919,7 @@ import Icon from '@/components/icons/Icon.vue'
 import type { AddMethod, AuthInputMethod } from '@/composables/useAccountOAuth'
 import type { AccountPlatform } from '@/types'
 import { adminAPI } from '@/api/admin'
+import { maskSessionKey } from '@/utils/maskSessionKey'
 
 interface Props {
   addMethod: AddMethod
@@ -908,6 +927,7 @@ interface Props {
   sessionId?: string
   loading?: boolean
   error?: string
+  cookieAuthProgress?: string
   showHelp?: boolean
   showProxyWarning?: boolean
   allowMultiple?: boolean
@@ -939,6 +959,7 @@ const props = withDefaults(defineProps<Props>(), {
   sessionId: '',
   loading: false,
   error: '',
+  cookieAuthProgress: '',
   showHelp: true,
   showProxyWarning: true,
   allowMultiple: false,
@@ -1065,12 +1086,14 @@ const showMethodSelection = computed(() => methodOptionCount.value > 1)
 const { copied, copyToClipboard } = useClipboard()
 
 // Computed
-const parsedKeyCount = computed(() => {
+const parsedSessionKeys = computed(() => {
   return sessionKeyInput.value
     .split('\n')
-    .map((k) => k.trim())
-    .filter((k) => k).length
+    .map((key) => key.trim())
+    .filter(Boolean)
 })
+const parsedKeyCount = computed(() => parsedSessionKeys.value.length)
+const sessionKeyPreviews = computed(() => parsedSessionKeys.value.map(maskSessionKey))
 
 // Computed: count of refresh tokens entered
 const parsedRefreshTokenCount = computed(() => {
