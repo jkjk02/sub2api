@@ -202,6 +202,10 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+		if s.handleUnsupportedCountTokensEndpoint(c, account, resp.StatusCode, respBody, upstreamMsg) {
+			return nil
+		}
+
 		upstreamDetail := ""
 		if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 			maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
@@ -303,14 +307,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 
-		// 中转站不支持 count_tokens 端点时（404），返回 404 让客户端 fallback 到本地估算。
-		// 仅在错误消息明确指向 count_tokens endpoint 不存在时生效，避免误吞其他 404（如错误 base_url）。
-		// 返回 nil 避免 handler 层记录为错误，也不设置 ops 上游错误上下文。
-		if isCountTokensUnsupported404(resp.StatusCode, respBody) {
-			logger.LegacyPrintf("service.gateway",
-				"[count_tokens] Upstream does not support count_tokens (404), returning 404: account=%d name=%s msg=%s",
-				account.ID, account.Name, truncateString(upstreamMsg, 512))
-			s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported by upstream")
+		if s.handleUnsupportedCountTokensEndpoint(c, account, resp.StatusCode, respBody, upstreamMsg) {
 			return nil
 		}
 
@@ -357,6 +354,21 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 	}
 	c.Data(resp.StatusCode, contentType, respBody)
 	return nil
+}
+
+func (s *GatewayService) handleUnsupportedCountTokensEndpoint(c *gin.Context, account *Account, statusCode int, body []byte, upstreamMsg string) bool {
+	if !isCountTokensUnsupportedEndpoint(statusCode, body) {
+		return false
+	}
+
+	// Some relays reject count_tokens as an unknown route with 400/405/501 instead of 404.
+	// Normalize only explicit unsupported-route responses so Claude clients can use local estimation.
+	// Return true so callers avoid recording the normalized fallback as an upstream failure.
+	logger.LegacyPrintf("service.gateway",
+		"[count_tokens] Upstream does not support count_tokens (status=%d), returning 404: account=%d name=%s msg=%s",
+		statusCode, account.ID, account.Name, truncateString(upstreamMsg, 512))
+	s.countTokensError(c, http.StatusNotFound, "not_found_error", "count_tokens endpoint is not supported by upstream")
+	return true
 }
 
 func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(

@@ -640,7 +640,7 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_EmptyModelSkipsMapping(t *tes
 	require.Equal(t, body, upstream.lastBody, "空模型名时请求体不应被修改")
 }
 
-func TestGatewayService_AnthropicAPIKeyPassthrough_CountTokens404PassthroughNotError(t *testing.T) {
+func TestGatewayService_AnthropicAPIKeyPassthrough_CountTokensUnsupportedEndpointNotError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -662,10 +662,16 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_CountTokens404PassthroughNotE
 			wantPassthrough: false,
 		},
 		{
-			name:            "400 Invalid URL does not passthrough",
+			name:            "400 Invalid URL passes through as fallback 404",
 			statusCode:      http.StatusBadRequest,
 			respBody:        `{"error":{"message":"Invalid URL (POST /v1/messages/count_tokens)","type":"invalid_request_error"}}`,
-			wantPassthrough: false,
+			wantPassthrough: true,
+		},
+		{
+			name:            "405 unsupported method passes through as fallback 404",
+			statusCode:      http.StatusMethodNotAllowed,
+			respBody:        `{"error":{"message":"count_tokens method not allowed","type":"invalid_request_error"}}`,
+			wantPassthrough: true,
 		},
 		{
 			name:            "400 model error does not passthrough",
@@ -739,6 +745,47 @@ func TestGatewayService_AnthropicAPIKeyPassthrough_CountTokens404PassthroughNotE
 			}
 		})
 	}
+}
+
+func TestGatewayService_CountTokensUnsupportedEndpointNotError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
+
+	body := []byte(`{"model":"relay-model","messages":[{"role":"user","content":"hi"}]}`)
+	parsed := &ParsedRequest{Body: NewRequestBodyRef(body), Model: "relay-model"}
+	upstream := &anthropicHTTPUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Invalid URL (POST /v1/messages/count_tokens)","type":"invalid_request_error"}}`)),
+		},
+	}
+	service := &GatewayService{
+		cfg:              &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}},
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{},
+	}
+	account := &Account{
+		ID:          201,
+		Name:        "regular-api-key",
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-regular",
+			"base_url": "https://proxy.example.com",
+		},
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+
+	err := service.ForwardCountTokens(context.Background(), c, account, parsed)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "count_tokens endpoint is not supported by upstream")
 }
 
 func TestGatewayService_AnthropicAPIKeyPassthrough_BuildRequestRejectsInvalidBaseURL(t *testing.T) {

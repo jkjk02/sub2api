@@ -330,18 +330,83 @@ func extractUpstreamErrorCode(body []byte) string {
 	return ""
 }
 
-func isCountTokensUnsupported404(statusCode int, body []byte) bool {
-	if statusCode != http.StatusNotFound {
+func isCountTokensUnsupportedEndpoint(statusCode int, body []byte) bool {
+	switch statusCode {
+	case http.StatusBadRequest,
+		http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusNotImplemented:
+	default:
 		return false
 	}
+
 	msg := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 	if msg == "" {
 		return false
 	}
-	if strings.Contains(msg, "/v1/messages/count_tokens") {
-		return true
+
+	hasEndpointPath := strings.Contains(msg, "/v1/messages/count_tokens")
+	if !hasEndpointPath && !strings.Contains(msg, "count_tokens") {
+		return false
 	}
-	return strings.Contains(msg, "count_tokens") && strings.Contains(msg, "not found")
+
+	// Do not turn credential, quota, model, or permission failures into a local-estimation fallback,
+	// even when an upstream includes the request path in its message.
+	nonRouteErrorMarkers := [...]string{
+		"api key",
+		"authentication",
+		"unauthorized",
+		"forbidden",
+		"permission",
+		"rate limit",
+		"quota",
+		"model",
+	}
+	for _, marker := range nonRouteErrorMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+
+	unsupportedRouteMarkers := [...]string{
+		"not found",
+		"unsupported",
+		"not supported",
+		"method not allowed",
+		"unknown route",
+		"invalid url",
+		"not implemented",
+	}
+	if hasEndpointPath {
+		for _, marker := range unsupportedRouteMarkers {
+			if strings.Contains(msg, marker) {
+				return true
+			}
+		}
+
+		// Preserve the historical explicit-path 404 fallback without treating generic 404s as unsupported.
+		return statusCode == http.StatusNotFound
+	}
+
+	routeSubjects := [...]string{
+		"count_tokens route",
+		"count_tokens endpoint",
+		"count_tokens url",
+		"count_tokens path",
+		"count_tokens method",
+	}
+	for _, subject := range routeSubjects {
+		if !strings.Contains(msg, subject) {
+			continue
+		}
+		for _, marker := range unsupportedRouteMarkers {
+			if strings.Contains(msg, marker) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (s *GatewayService) readUpstreamErrorBody(resp *http.Response) ([]byte, error) {

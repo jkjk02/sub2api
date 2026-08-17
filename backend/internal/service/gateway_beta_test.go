@@ -1,10 +1,13 @@
 package service
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,7 +199,7 @@ func TestStripBetaTokensWithSet_EmptyDropSet(t *testing.T) {
 	require.Equal(t, header, got)
 }
 
-func TestIsCountTokensUnsupported404(t *testing.T) {
+func TestIsCountTokensUnsupportedEndpoint(t *testing.T) {
 	tests := []struct {
 		name       string
 		statusCode int
@@ -228,19 +231,87 @@ func TestIsCountTokensUnsupported404(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "non-404 status",
+			name:       "bad request invalid endpoint URL",
 			statusCode: 400,
-			body:       `{"error":{"message":"Not found: /v1/messages/count_tokens","type":"invalid_request_error"}}`,
+			body:       `{"error":{"message":"Invalid URL (POST /v1/messages/count_tokens)","type":"invalid_request_error"}}`,
+			want:       true,
+		},
+		{
+			name:       "bad request unsupported route",
+			statusCode: 400,
+			body:       `{"error":{"message":"count_tokens route is not supported","type":"invalid_request_error"}}`,
+			want:       true,
+		},
+		{
+			name:       "method not allowed",
+			statusCode: 405,
+			body:       `{"error":{"message":"count_tokens method not allowed","type":"invalid_request_error"}}`,
+			want:       true,
+		},
+		{
+			name:       "not implemented",
+			statusCode: 501,
+			body:       `{"error":{"message":"count_tokens endpoint not implemented","type":"api_error"}}`,
+			want:       true,
+		},
+		{
+			name:       "model-specific count_tokens unsupported",
+			statusCode: 400,
+			body:       `{"error":{"message":"count_tokens is not supported for model claude-example","type":"invalid_request_error"}}`,
+			want:       false,
+		},
+		{
+			name:       "bad request model not found",
+			statusCode: 400,
+			body:       `{"error":{"message":"model not found","type":"invalid_request_error"}}`,
+			want:       false,
+		},
+		{
+			name:       "model error includes endpoint path",
+			statusCode: 400,
+			body:       `{"error":{"message":"model not found for /v1/messages/count_tokens","type":"invalid_request_error"}}`,
+			want:       false,
+		},
+		{
+			name:       "authentication error includes endpoint path",
+			statusCode: 400,
+			body:       `{"error":{"message":"authentication failed for /v1/messages/count_tokens","type":"authentication_error"}}`,
+			want:       false,
+		},
+		{
+			name:       "bad request invalid API key",
+			statusCode: 400,
+			body:       `{"error":{"message":"invalid API key","type":"authentication_error"}}`,
+			want:       false,
+		},
+		{
+			name:       "internal count_tokens failure",
+			statusCode: 500,
+			body:       `{"error":{"message":"count_tokens internal error","type":"api_error"}}`,
 			want:       false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isCountTokensUnsupported404(tt.statusCode, []byte(tt.body))
+			got := isCountTokensUnsupportedEndpoint(tt.statusCode, []byte(tt.body))
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestHandleUnsupportedCountTokensEndpoint(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	service := &GatewayService{}
+	account := &Account{ID: 42, Name: "relay"}
+	body := []byte(`{"error":{"message":"Invalid URL (POST /v1/messages/count_tokens)","type":"invalid_request_error"}}`)
+
+	handled := service.handleUnsupportedCountTokensEndpoint(c, account, http.StatusBadRequest, body, "Invalid URL (POST /v1/messages/count_tokens)")
+
+	require.True(t, handled)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.JSONEq(t, `{"type":"error","error":{"type":"not_found_error","message":"count_tokens endpoint is not supported by upstream"}}`, recorder.Body.String())
 }
 
 // TestDefaultBetaPolicy_Context1M_Sonnet5Whitelist 验证默认策略下 context-1m-2025-08-07 的分模型行为：
