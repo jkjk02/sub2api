@@ -1187,37 +1187,30 @@ func mergePlatformQuotaDefaults(dst, src *DefaultPlatformQuotaSetting) {
 
 // GetClaudeGatewaySettings returns the centralized Anthropic compatibility and stability profile.
 func (s *SettingService) GetClaudeGatewaySettings(ctx context.Context) (*ClaudeGatewaySettings, error) {
-	fallback := DefaultClaudeGatewaySettings()
-	if s != nil && s.cfg != nil {
-		c := s.cfg.Gateway.CliSimulation
-		fallback = &ClaudeGatewaySettings{
-			StabilityProtectionEnabled: c.StabilityProtectionEnabled, RespectRetryAfter: c.RespectRetryAfter,
-			RetryJitterEnabled: c.RetryJitterEnabled, TrafficSmoothingEnabled: c.TrafficSmoothingEnabled,
-			MaxRetryAttempts: c.MaxRetryAttempts, RetryBaseDelayMs: c.RetryBaseDelayMs,
-			RetryMaxDelayMs: c.RetryMaxDelayMs, RetryMaxElapsedSeconds: c.RetryMaxElapsedSeconds,
-			RateLimitFallbackCooldownSeconds: c.RateLimitFallbackCooldownSeconds,
-			OAuthAuthCooldownMinutes:         c.OAuthAuthCooldownMinutes,
-			ProtocolMode:                     c.EffectiveProtocolMode(), Enabled: c.Enabled,
-			ForceCLIBetaForAPIKey: c.ForceCLIBetaForAPIKey, EnableCCMimicHeadersForAPIKey: c.EnableCCMimicHeadersForAPIKey,
-			CCVersionOverride: c.CCVersionOverride, CCVersionPool: append([]string(nil), c.CCVersionPool...),
-			OSArchPool: append([]config.OSArchEntry(nil), c.OSArchPool...), ExtraBetaTokens: append([]string(nil), c.ExtraBetaTokens...),
-			CacheControlTTLOverride: c.CacheControlTTLOverride, FingerprintSaltOverride: c.FingerprintSaltOverride,
-			EnableTLSFingerprint: c.EnableTLSFingerprint, TLSFingerprintProfileID: c.TLSFingerprintProfileID,
-			TLSProfilePoolSize: c.TLSProfilePoolSize, MinInterRequestDelayMs: c.MinInterRequestDelayMs,
-			MaxInterRequestDelayMs: c.MaxInterRequestDelayMs, SystemPromptStaticOverride: c.SystemPromptStaticOverride,
+	if s != nil {
+		s.claudeGatewaySettingsMu.Lock()
+		defer s.claudeGatewaySettingsMu.Unlock()
+	}
+	fallback := claudeGatewaySettingsFromConfig(s.claudeGatewayRuntimeConfig())
+	if s == nil || s.settingRepo == nil {
+		if s != nil {
+			s.applyClaudeGatewaySettingsToRuntime(fallback)
+			s.claudeGatewaySettingsLoaded.Store(true)
 		}
-		normalizeClaudeGatewaySettings(fallback)
+		return fallback, nil
 	}
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyClaudeGatewaySettings)
 	if err != nil {
 		if errors.Is(err, ErrSettingNotFound) {
 			s.applyClaudeGatewaySettingsToRuntime(fallback)
+			s.claudeGatewaySettingsLoaded.Store(true)
 			return fallback, nil
 		}
 		return nil, fmt.Errorf("get claude gateway settings: %w", err)
 	}
 	if strings.TrimSpace(value) == "" {
 		s.applyClaudeGatewaySettingsToRuntime(fallback)
+		s.claudeGatewaySettingsLoaded.Store(true)
 		return fallback, nil
 	}
 	// Unmarshal over the fallback so settings saved by older versions inherit
@@ -1225,11 +1218,28 @@ func (s *SettingService) GetClaudeGatewaySettings(ctx context.Context) (*ClaudeG
 	settings := *fallback
 	if err := json.Unmarshal([]byte(value), &settings); err != nil {
 		slog.Warn("failed to unmarshal claude gateway settings, falling back to config", "error", err)
+		s.applyClaudeGatewaySettingsToRuntime(fallback)
+		s.claudeGatewaySettingsLoaded.Store(true)
 		return fallback, nil
 	}
 	normalizeClaudeGatewaySettings(&settings)
 	s.applyClaudeGatewaySettingsToRuntime(&settings)
+	s.claudeGatewaySettingsLoaded.Store(true)
 	return &settings, nil
+}
+
+func (s *SettingService) ensureClaudeGatewaySettingsLoaded(ctx context.Context) error {
+	if s == nil || s.claudeGatewaySettingsLoaded.Load() {
+		return nil
+	}
+	_, err, _ := s.claudeGatewaySettingsSF.Do("load", func() (any, error) {
+		if s.claudeGatewaySettingsLoaded.Load() {
+			return nil, nil
+		}
+		_, loadErr := s.GetClaudeGatewaySettings(ctx)
+		return nil, loadErr
+	})
+	return err
 }
 
 func normalizeClaudeGatewaySettings(settings *ClaudeGatewaySettings) {
@@ -1295,11 +1305,32 @@ func normalizeClaudeGatewaySettings(settings *ClaudeGatewaySettings) {
 	}
 }
 
-func (s *SettingService) applyClaudeGatewaySettingsToRuntime(settings *ClaudeGatewaySettings) {
-	if s == nil || s.cfg == nil || settings == nil {
-		return
+func claudeGatewaySettingsFromConfig(c config.CliSimulationConfig) *ClaudeGatewaySettings {
+	settings := &ClaudeGatewaySettings{
+		StabilityProtectionEnabled: c.StabilityProtectionEnabled, RespectRetryAfter: c.RespectRetryAfter,
+		RetryJitterEnabled: c.RetryJitterEnabled, TrafficSmoothingEnabled: c.TrafficSmoothingEnabled,
+		MaxRetryAttempts: c.MaxRetryAttempts, RetryBaseDelayMs: c.RetryBaseDelayMs,
+		RetryMaxDelayMs: c.RetryMaxDelayMs, RetryMaxElapsedSeconds: c.RetryMaxElapsedSeconds,
+		RateLimitFallbackCooldownSeconds: c.RateLimitFallbackCooldownSeconds,
+		OAuthAuthCooldownMinutes:         c.OAuthAuthCooldownMinutes,
+		ProtocolMode:                     c.EffectiveProtocolMode(), Enabled: c.Enabled,
+		ForceCLIBetaForAPIKey: c.ForceCLIBetaForAPIKey, EnableCCMimicHeadersForAPIKey: c.EnableCCMimicHeadersForAPIKey,
+		CCVersionOverride: c.CCVersionOverride, CCVersionPool: append([]string(nil), c.CCVersionPool...),
+		OSArchPool: append([]config.OSArchEntry(nil), c.OSArchPool...), ExtraBetaTokens: append([]string(nil), c.ExtraBetaTokens...),
+		CacheControlTTLOverride: c.CacheControlTTLOverride, FingerprintSaltOverride: c.FingerprintSaltOverride,
+		EnableTLSFingerprint: c.EnableTLSFingerprint, TLSFingerprintProfileID: c.TLSFingerprintProfileID,
+		TLSProfilePoolSize: c.TLSProfilePoolSize, MinInterRequestDelayMs: c.MinInterRequestDelayMs,
+		MaxInterRequestDelayMs: c.MaxInterRequestDelayMs, SystemPromptStaticOverride: c.SystemPromptStaticOverride,
 	}
-	s.cfg.Gateway.CliSimulation = config.CliSimulationConfig{
+	normalizeClaudeGatewaySettings(settings)
+	return settings
+}
+
+func claudeGatewayConfigFromSettings(settings *ClaudeGatewaySettings) config.CliSimulationConfig {
+	if settings == nil {
+		return config.CliSimulationConfig{}
+	}
+	return config.CliSimulationConfig{
 		StabilityProtectionEnabled: settings.StabilityProtectionEnabled, RespectRetryAfter: settings.RespectRetryAfter,
 		RetryJitterEnabled: settings.RetryJitterEnabled, TrafficSmoothingEnabled: settings.TrafficSmoothingEnabled,
 		MaxRetryAttempts: settings.MaxRetryAttempts, RetryBaseDelayMs: settings.RetryBaseDelayMs,
@@ -1317,7 +1348,18 @@ func (s *SettingService) applyClaudeGatewaySettingsToRuntime(settings *ClaudeGat
 	}
 }
 
+func (s *SettingService) applyClaudeGatewaySettingsToRuntime(settings *ClaudeGatewaySettings) {
+	if s == nil || settings == nil {
+		return
+	}
+	s.storeClaudeGatewayRuntimeConfig(claudeGatewayConfigFromSettings(settings))
+}
+
 func (s *SettingService) SetClaudeGatewaySettings(ctx context.Context, settings *ClaudeGatewaySettings) error {
+	if s != nil {
+		s.claudeGatewaySettingsMu.Lock()
+		defer s.claudeGatewaySettingsMu.Unlock()
+	}
 	if settings == nil {
 		return fmt.Errorf("settings cannot be nil")
 	}
@@ -1330,5 +1372,6 @@ func (s *SettingService) SetClaudeGatewaySettings(ctx context.Context, settings 
 		return err
 	}
 	s.applyClaudeGatewaySettingsToRuntime(settings)
+	s.claudeGatewaySettingsLoaded.Store(true)
 	return nil
 }

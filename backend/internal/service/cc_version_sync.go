@@ -54,7 +54,8 @@ func (s *GatewayService) getCLIVersionRuntime() *cliVersionRuntime {
 // Request-critical values are read from this GatewayService's config instead of
 // mutating package globals, so multiple service instances cannot contaminate each other.
 func (s *GatewayService) applyCliSimulationOverrides() {
-	if !s.legacyCLIProtocolEnabled() {
+	sim := s.claudeGatewayRuntimeConfig()
+	if sim.EffectiveProtocolMode() != "legacy" {
 		return
 	}
 	runtime := s.getCLIVersionRuntime()
@@ -62,7 +63,6 @@ func (s *GatewayService) applyCliSimulationOverrides() {
 		return
 	}
 	runtime.overridesOnce.Do(func() {
-		sim := s.cfg.Gateway.CliSimulation
 		if sim.CCVersionOverride != "" {
 			slog.Info("cli simulation: cc version override active", "version", sim.CCVersionOverride)
 		}
@@ -81,11 +81,12 @@ func (s *GatewayService) applyCliSimulationOverrides() {
 // ensureCLIVersionSync lazily starts one background npm version sync loop per
 // GatewayService. The worker is owned by the service rather than a request context.
 func (s *GatewayService) ensureCLIVersionSync(_ context.Context) {
-	if !s.legacyCLIProtocolEnabled() {
+	sim := s.claudeGatewayRuntimeConfig()
+	if sim.EffectiveProtocolMode() != "legacy" {
 		return
 	}
 	s.applyCliSimulationOverrides()
-	if strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride) != "" {
+	if strings.TrimSpace(sim.CCVersionOverride) != "" {
 		return
 	}
 	runtime := s.getCLIVersionRuntime()
@@ -131,8 +132,9 @@ func (s *GatewayService) SyncCLIVersion(ctx context.Context) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("gateway service required")
 	}
-	if s.legacyCLIProtocolEnabled() {
-		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+	sim := s.claudeGatewayRuntimeConfig()
+	if sim.EffectiveProtocolMode() == "legacy" {
+		if v := strings.TrimSpace(sim.CCVersionOverride); v != "" {
 			return v, nil
 		}
 	}
@@ -177,8 +179,12 @@ func (s *GatewayService) SyncCLIVersion(ctx context.Context) (string, error) {
 // GetEffectiveCLIVersion returns this service's effective CC version
 // (service config override > service-synced value > compile-time constant).
 func (s *GatewayService) GetEffectiveCLIVersion() string {
-	if s != nil && s.legacyCLIProtocolEnabled() {
-		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+	if s != nil {
+		sim := s.claudeGatewayRuntimeConfig()
+		if sim.EffectiveProtocolMode() != "legacy" {
+			return claude.CLICurrentVersion
+		}
+		if v := strings.TrimSpace(sim.CCVersionOverride); v != "" {
 			return v
 		}
 		if runtime := s.getCLIVersionRuntime(); runtime != nil {
@@ -193,12 +199,16 @@ func (s *GatewayService) GetEffectiveCLIVersion() string {
 // resolveAccountCLIVersion returns the CC version for this account's requests.
 // Priority: service override, stable account pool, service-synced value, constant.
 func (s *GatewayService) resolveAccountCLIVersion(account *Account) string {
-	if s != nil && s.legacyCLIProtocolEnabled() {
-		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.CCVersionOverride); v != "" {
+	if s != nil {
+		sim := s.claudeGatewayRuntimeConfig()
+		if sim.EffectiveProtocolMode() != "legacy" {
+			return s.GetEffectiveCLIVersion()
+		}
+		if v := strings.TrimSpace(sim.CCVersionOverride); v != "" {
 			return v
 		}
 		if account != nil {
-			if pool := s.cfg.Gateway.CliSimulation.CCVersionPool; len(pool) > 0 {
+			if pool := sim.CCVersionPool; len(pool) > 0 {
 				if v := strings.TrimSpace(pool[stableIndexForAccount(account.ID, len(pool))]); v != "" {
 					return v
 				}
@@ -218,14 +228,17 @@ func (s *GatewayService) resolveAccountOSArch(account *Account) (osName, arch st
 	if osName != "" && arch != "" {
 		return osName, arch
 	}
-	if s != nil && s.legacyCLIProtocolEnabled() {
-		if pool := s.cfg.Gateway.CliSimulation.OSArchPool; len(pool) > 0 {
-			entry := pool[stableIndexForAccount(account.ID, len(pool))]
-			if osName == "" {
-				osName = entry.OS
-			}
-			if arch == "" {
-				arch = entry.Arch
+	if s != nil {
+		sim := s.claudeGatewayRuntimeConfig()
+		if sim.EffectiveProtocolMode() == "legacy" {
+			if pool := sim.OSArchPool; len(pool) > 0 {
+				entry := pool[stableIndexForAccount(account.ID, len(pool))]
+				if osName == "" {
+					osName = entry.OS
+				}
+				if arch == "" {
+					arch = entry.Arch
+				}
 			}
 		}
 	}
@@ -249,9 +262,12 @@ func stableIndexForAccount(accountID int64, n int) int {
 
 // GetEffectiveFingerprintSalt returns this service's effective billing salt.
 func (s *GatewayService) GetEffectiveFingerprintSalt() string {
-	if s != nil && s.legacyCLIProtocolEnabled() {
-		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.FingerprintSaltOverride); v != "" {
-			return v
+	if s != nil {
+		sim := s.claudeGatewayRuntimeConfig()
+		if sim.EffectiveProtocolMode() == "legacy" {
+			if v := strings.TrimSpace(sim.FingerprintSaltOverride); v != "" {
+				return v
+			}
 		}
 	}
 	return fingerprintSalt
@@ -260,9 +276,12 @@ func (s *GatewayService) GetEffectiveFingerprintSalt() string {
 // getEffectiveSystemPromptExpansion returns the service-scoped static prompt
 // override when legacy synthesis is active, otherwise the built-in default.
 func (s *GatewayService) getEffectiveSystemPromptExpansion() string {
-	if s != nil && s.legacyCLIProtocolEnabled() {
-		if v := strings.TrimSpace(s.cfg.Gateway.CliSimulation.SystemPromptStaticOverride); v != "" {
-			return v
+	if s != nil {
+		sim := s.claudeGatewayRuntimeConfig()
+		if sim.EffectiveProtocolMode() == "legacy" {
+			if v := strings.TrimSpace(sim.SystemPromptStaticOverride); v != "" {
+				return v
+			}
 		}
 	}
 	return claudeCodeSystemPromptExpansion

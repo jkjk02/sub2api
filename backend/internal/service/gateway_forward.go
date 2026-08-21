@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -51,11 +52,10 @@ func (s *GatewayService) gatewayRetryPolicy() gatewayRetryPolicy {
 		maxDelay:    retryMaxDelay,
 		maxElapsed:  maxRetryElapsed,
 	}
-	if s == nil || s.cfg == nil {
+	if s == nil {
 		return policy
 	}
-	s.ensureCLISimulationSettingsLoaded()
-	c := s.cfg.Gateway.CliSimulation
+	c := s.claudeGatewayRuntimeConfig()
 	if !c.StabilityProtectionEnabled {
 		return policy
 	}
@@ -83,15 +83,12 @@ func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode i
 	if account == nil || account.IsOAuth() || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return false
 	}
-	if s != nil && s.cfg != nil {
-		s.ensureCLISimulationSettingsLoaded()
-		if s.cfg.Gateway.CliSimulation.StabilityProtectionEnabled {
-			switch statusCode {
-			case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
-				return true
-			default:
-				return statusCode >= http.StatusInternalServerError
-			}
+	if s != nil && s.claudeGatewayRuntimeConfig().StabilityProtectionEnabled {
+		switch statusCode {
+		case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+			return true
+		default:
+			return statusCode >= http.StatusInternalServerError
 		}
 	}
 	return !account.ShouldHandleErrorCode(statusCode)
@@ -135,6 +132,90 @@ func (s *GatewayService) retryBackoffDelay(attempt int, resp *http.Response, pol
 		}
 	}
 	return delay
+}
+
+func retryDelayWithinBudget(now, deadline time.Time, delay time.Duration) (time.Duration, bool) {
+	remaining := deadline.Sub(now)
+	if remaining <= 0 || delay >= remaining {
+		return 0, false
+	}
+	return delay, delay > 0
+}
+
+type gatewayRetryAttemptGuard struct {
+	cancel  context.CancelFunc
+	release context.CancelFunc
+	timer   *time.Timer
+	fired   chan struct{}
+	once    sync.Once
+}
+
+func gatewayRetryAttemptContext(ctx context.Context, stream bool, deadline time.Time) (context.Context, *gatewayRetryAttemptGuard) {
+	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, stream)
+	attemptCtx, cancelAttempt := context.WithCancel(upstreamCtx)
+	guard := &gatewayRetryAttemptGuard{
+		cancel:  cancelAttempt,
+		release: releaseUpstreamCtx,
+		fired:   make(chan struct{}),
+	}
+	remaining := time.Until(deadline)
+	if deadline.IsZero() || remaining <= 0 {
+		remaining = time.Nanosecond
+	}
+	guard.timer = time.AfterFunc(remaining, func() {
+		close(guard.fired)
+		cancelAttempt()
+	})
+	return attemptCtx, guard
+}
+
+func (g *gatewayRetryAttemptGuard) stopHeaderWait() {
+	if g == nil || g.timer == nil {
+		return
+	}
+	if !g.timer.Stop() {
+		<-g.fired
+	}
+}
+
+func (g *gatewayRetryAttemptGuard) responseReceived(resp *http.Response) {
+	g.stopHeaderWait()
+	if resp == nil || resp.Body == nil {
+		g.close()
+		return
+	}
+	resp.Body = &gatewayRetryAttemptBody{
+		ReadCloser: resp.Body,
+		cleanup:    g.close,
+	}
+}
+
+func (g *gatewayRetryAttemptGuard) close() {
+	if g == nil {
+		return
+	}
+	g.once.Do(func() {
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+		g.cancel()
+		g.release()
+	})
+}
+
+type gatewayRetryAttemptBody struct {
+	io.ReadCloser
+	cleanup func()
+	once    sync.Once
+	err     error
+}
+
+func (b *gatewayRetryAttemptBody) Close() error {
+	b.once.Do(func() {
+		b.err = b.ReadCloser.Close()
+		b.cleanup()
+	})
+	return b.err
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
@@ -401,11 +482,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// TLS profile 由独立的 Claude 网关设置统一控制；账号登录/编辑页中的历史字段不再生效。
 	var tlsProfile *tlsfingerprint.Profile
-	if account != nil && account.Platform == PlatformAnthropic && s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.EnableTLSFingerprint {
+	cliRuntime := s.claudeGatewayRuntimeConfig()
+	if account != nil && account.Platform == PlatformAnthropic && cliRuntime.LegacySynthesisEnabled() && cliRuntime.EnableTLSFingerprint {
 		tlsProfile = s.tlsFPProfileService.ResolveGlobalTLSProfile(
 			account.ID,
-			s.cfg.Gateway.CliSimulation.TLSFingerprintProfileID,
-			s.cfg.Gateway.CliSimulation.TLSProfilePoolSize,
+			cliRuntime.TLSFingerprintProfileID,
+			cliRuntime.TLSProfilePoolSize,
 		)
 	}
 
@@ -454,13 +536,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	maxRetryAttempts := retryPolicy.maxAttempts
 	maxRetryElapsed := retryPolicy.maxElapsed
 	retryStart := time.Now()
+	retryDeadline := retryStart.Add(maxRetryElapsed)
 	authRecoveryAttempted := false
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+		if !time.Now().Before(retryDeadline) {
+			break
+		}
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
-		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
+		upstreamCtx, attemptGuard := gatewayRetryAttemptContext(ctx, reqStream, retryDeadline)
 		upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode || shouldSimulateCLIForAPIKey)
-		releaseUpstreamCtx()
 		if err != nil {
+			attemptGuard.close()
 			return nil, err
 		}
 		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
@@ -468,13 +554,15 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 		// 稳定性节流仅在首次尝试执行，重试由指数退避控制。
 		if attempt == 1 && account.Platform == PlatformAnthropic {
-			if err := s.applyInterRequestDelay(ctx, account.ID); err != nil {
+			if err := s.applyInterRequestDelay(upstreamCtx, account.ID); err != nil {
+				attemptGuard.close()
 				return nil, err
 			}
 		}
 
 		// 发送请求
 		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+		attemptGuard.responseReceived(resp)
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -545,6 +633,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 								Reason:             string(failoverErr.Reason),
 								Message:            failoverErr.ClientMessage,
 							})
+							s.handleClaudeOAuthRecoveryFailure(ctx, resp, account, recoveryErr)
 							_ = resp.Body.Close()
 							return nil, failoverErr
 						}
@@ -605,11 +694,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					//    also downgrade tool_use/tool_result blocks to text.
 
 					filteredBody := FilterThinkingBlocksForRetry(body, reqModel)
-					retryCtx, releaseRetryCtx := detachStreamUpstreamContext(ctx, reqStream)
+					retryCtx, retryGuard := gatewayRetryAttemptContext(ctx, reqStream, retryDeadline)
 					retryReq, retryWireBody, buildErr := s.buildUpstreamRequest(retryCtx, c, account, filteredBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
-					releaseRetryCtx()
 					if buildErr == nil {
 						retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+						retryGuard.responseReceived(retryResp)
 						if retryErr == nil {
 							if retryResp.StatusCode < 400 {
 								// 重试请求被上游接受后同步 ParsedRequest，保证 usage/日志看到真实请求体。
@@ -646,11 +735,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 								if looksLikeToolSignatureError(msg2) && time.Since(retryStart) < maxRetryElapsed {
 									logger.LegacyPrintf("service.gateway", "Account %d: signature retry still failing and looks tool-related, retrying with tool blocks downgraded", account.ID)
 									filteredBody2 := FilterSignatureSensitiveBlocksForRetry(body, reqModel)
-									retryCtx2, releaseRetryCtx2 := detachStreamUpstreamContext(ctx, reqStream)
+									retryCtx2, retryGuard2 := gatewayRetryAttemptContext(ctx, reqStream, retryDeadline)
 									retryReq2, retryWireBody2, buildErr2 := s.buildUpstreamRequest(retryCtx2, c, account, filteredBody2, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
-									releaseRetryCtx2()
 									if buildErr2 == nil {
 										retryResp2, retryErr2 := s.httpUpstream.DoWithTLS(retryReq2, proxyURL, account.ID, account.Concurrency, tlsProfile)
+										retryGuard2.responseReceived(retryResp2)
 										if retryErr2 == nil {
 											if retryResp2.StatusCode < 400 {
 												// 二阶段工具块降级成功时也必须更新当前 body。
@@ -677,6 +766,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 										})
 										logger.LegacyPrintf("service.gateway", "Account %d: tool-downgrade signature retry failed: %v", account.ID, retryErr2)
 									} else {
+										retryGuard2.close()
 										logger.LegacyPrintf("service.gateway", "Account %d: tool-downgrade signature retry build failed: %v", account.ID, buildErr2)
 									}
 								}
@@ -695,6 +785,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 						}
 						logger.LegacyPrintf("service.gateway", "Account %d: signature error retry failed: %v", account.ID, retryErr)
 					} else {
+						retryGuard.close()
 						logger.LegacyPrintf("service.gateway", "Account %d: signature error retry build request failed: %v", account.ID, buildErr)
 					}
 
@@ -725,11 +816,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					rectifiedBody, applied := RectifyThinkingBudget(body)
 					if applied && time.Since(retryStart) < maxRetryElapsed {
 						logger.LegacyPrintf("service.gateway", "Account %d: detected budget_tokens constraint error, retrying with rectified budget (budget_tokens=%d, max_tokens=%d)", account.ID, BudgetRectifyBudgetTokens, BudgetRectifyMaxTokens)
-						budgetRetryCtx, releaseBudgetRetryCtx := detachStreamUpstreamContext(ctx, reqStream)
+						budgetRetryCtx, budgetRetryGuard := gatewayRetryAttemptContext(ctx, reqStream, retryDeadline)
 						budgetRetryReq, budgetWireBody, buildErr := s.buildUpstreamRequest(budgetRetryCtx, c, account, rectifiedBody, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
-						releaseBudgetRetryCtx()
 						if buildErr == nil {
 							budgetRetryResp, retryErr := s.httpUpstream.DoWithTLS(budgetRetryReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+							budgetRetryGuard.responseReceived(budgetRetryResp)
 							if retryErr == nil {
 								if budgetRetryResp.StatusCode < 400 {
 									// budget 修正请求成功后，ParsedRequest 也要描述被接受的修正版。
@@ -747,6 +838,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 							}
 							logger.LegacyPrintf("service.gateway", "Account %d: budget rectifier retry failed: %v", account.ID, retryErr)
 						} else {
+							budgetRetryGuard.close()
 							logger.LegacyPrintf("service.gateway", "Account %d: budget rectifier retry build failed: %v", account.ID, buildErr)
 						}
 					}
@@ -765,11 +857,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 				}
 
 				delay := s.retryBackoffDelay(attempt, resp, retryPolicy)
-				remaining := maxRetryElapsed - elapsed
-				if delay > remaining {
-					delay = remaining
-				}
-				if delay <= 0 {
+				var retryAllowed bool
+				delay, retryAllowed = retryDelayWithinBudget(time.Now(), retryDeadline, delay)
+				if !retryAllowed {
 					break
 				}
 

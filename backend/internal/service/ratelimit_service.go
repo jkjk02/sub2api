@@ -94,10 +94,11 @@ func NewRateLimitService(accountRepo AccountRepository, usageRepo UsageLogReposi
 
 func (s *RateLimitService) claudeStabilityConfig(ctx context.Context) config.CliSimulationConfig {
 	if s != nil && s.settingService != nil {
-		_, _ = s.settingService.GetClaudeGatewaySettings(ctx)
+		_ = s.settingService.ensureClaudeGatewaySettingsLoaded(ctx)
+		return s.settingService.claudeGatewayRuntimeConfig()
 	}
 	if s != nil && s.cfg != nil {
-		return s.cfg.Gateway.CliSimulation
+		return cloneCLISimulationConfig(s.cfg.Gateway.CliSimulation)
 	}
 	return config.CliSimulationConfig{
 		StabilityProtectionEnabled:       true,

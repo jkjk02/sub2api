@@ -150,6 +150,14 @@ type SettingService struct {
 	openAIQuotaAutoPauseSettingsCache atomic.Value // *cachedOpenAIQuotaAutoPauseSettings
 	openAIQuotaAutoPauseSettingsSF    singleflight.Group
 
+	// claudeGatewaySettingsMu serializes DB reads/writes with runtime publication.
+	// Without it, a slow GET that read the old JSON could publish a stale snapshot
+	// after a concurrent successful PUT had already persisted and published new settings.
+	claudeGatewaySettingsMu     sync.Mutex
+	claudeGatewayRuntime        atomic.Pointer[config.CliSimulationConfig]
+	claudeGatewaySettingsLoaded atomic.Bool
+	claudeGatewaySettingsSF     singleflight.Group
+
 	channelMonitorRuntimeListenersMu sync.Mutex
 	channelMonitorRuntimeListeners   []func()
 }
@@ -282,10 +290,49 @@ const (
 
 // NewSettingService 创建系统设置服务实例
 func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *SettingService {
-	return &SettingService{
+	service := &SettingService{
 		settingRepo: settingRepo,
 		cfg:         cfg,
 	}
+	initial := config.CliSimulationConfig{}
+	if cfg != nil {
+		initial = cfg.Gateway.CliSimulation
+	} else {
+		defaults := DefaultClaudeGatewaySettings()
+		normalizeClaudeGatewaySettings(defaults)
+		initial = claudeGatewayConfigFromSettings(defaults)
+	}
+	service.storeClaudeGatewayRuntimeConfig(initial)
+	return service
+}
+
+func cloneCLISimulationConfig(source config.CliSimulationConfig) config.CliSimulationConfig {
+	cloned := source
+	cloned.CCVersionPool = append([]string(nil), source.CCVersionPool...)
+	cloned.OSArchPool = append([]config.OSArchEntry(nil), source.OSArchPool...)
+	cloned.ExtraBetaTokens = append([]string(nil), source.ExtraBetaTokens...)
+	return cloned
+}
+
+func (s *SettingService) storeClaudeGatewayRuntimeConfig(runtime config.CliSimulationConfig) {
+	if s == nil {
+		return
+	}
+	cloned := cloneCLISimulationConfig(runtime)
+	s.claudeGatewayRuntime.Store(&cloned)
+}
+
+// claudeGatewayRuntimeConfig returns a detached copy so callers cannot mutate
+// the atomically published immutable snapshot or share its slice backing arrays.
+func (s *SettingService) claudeGatewayRuntimeConfig() config.CliSimulationConfig {
+	if s != nil {
+		if runtime := s.claudeGatewayRuntime.Load(); runtime != nil {
+			return cloneCLISimulationConfig(*runtime)
+		}
+	}
+	defaults := DefaultClaudeGatewaySettings()
+	normalizeClaudeGatewaySettings(defaults)
+	return claudeGatewayConfigFromSettings(defaults)
 }
 
 // SetDefaultSubscriptionGroupReader injects an optional group reader for default subscription validation.

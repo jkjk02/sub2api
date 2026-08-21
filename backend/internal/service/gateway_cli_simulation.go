@@ -13,23 +13,33 @@ func (s *GatewayService) ensureCLISimulationSettingsLoaded() {
 	if s == nil || s.settingService == nil {
 		return
 	}
-	s.cliSimulationSettingsOnce.Do(func() {
-		_, _ = s.settingService.GetClaudeGatewaySettings(context.Background())
-	})
+	_ = s.settingService.ensureClaudeGatewaySettingsLoaded(context.Background())
+}
+
+// claudeGatewayRuntimeConfig returns one detached, internally consistent runtime snapshot.
+func (s *GatewayService) claudeGatewayRuntimeConfig() config.CliSimulationConfig {
+	if s != nil && s.settingService != nil {
+		s.ensureCLISimulationSettingsLoaded()
+		return s.settingService.claudeGatewayRuntimeConfig()
+	}
+	if s != nil && s.cfg != nil {
+		return cloneCLISimulationConfig(s.cfg.Gateway.CliSimulation)
+	}
+	defaults := DefaultClaudeGatewaySettings()
+	normalizeClaudeGatewaySettings(defaults)
+	return claudeGatewayConfigFromSettings(defaults)
 }
 
 // legacyCLIProtocolEnabled centralizes the compatibility gate for fork-specific
 // Claude Code synthesis. Unknown/empty protocol modes are normalized by config.
 func (s *GatewayService) legacyCLIProtocolEnabled() bool {
-	s.ensureCLISimulationSettingsLoaded()
-	return s != nil && s.cfg != nil &&
-		s.cfg.Gateway.CliSimulation.EffectiveProtocolMode() == config.CliSimulationProtocolModeLegacy
+	return s != nil &&
+		s.claudeGatewayRuntimeConfig().EffectiveProtocolMode() == config.CliSimulationProtocolModeLegacy
 }
 
 // legacyAPIKeyCLISimulationEnabled additionally honors the API-key feature switch.
 func (s *GatewayService) legacyAPIKeyCLISimulationEnabled() bool {
-	s.ensureCLISimulationSettingsLoaded()
-	return s != nil && s.cfg != nil && s.cfg.Gateway.CliSimulation.LegacySynthesisEnabled()
+	return s != nil && s.claudeGatewayRuntimeConfig().LegacySynthesisEnabled()
 }
 
 // applyInterRequestDelay smooths short request bursts per account before the first upstream attempt.
@@ -38,11 +48,10 @@ func (s *GatewayService) applyInterRequestDelay(ctx context.Context, accountID i
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.ensureCLISimulationSettingsLoaded()
-	if s == nil || s.cfg == nil {
+	if s == nil {
 		return nil
 	}
-	c := s.cfg.Gateway.CliSimulation
+	c := s.claudeGatewayRuntimeConfig()
 	if !c.StabilityProtectionEnabled || !c.TrafficSmoothingEnabled {
 		return nil
 	}

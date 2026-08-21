@@ -649,18 +649,38 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 }
 
+func (s *GatewayService) handleClaudeOAuthRecoveryFailure(ctx context.Context, resp *http.Response, account *Account, recoveryErr *ClaudeOAuthAuthRecoveryError) {
+	if s == nil || s.rateLimitService == nil || resp == nil || account == nil || recoveryErr == nil {
+		return
+	}
+	if recoveryErr.ReauthRequired || recoveryErr.Scope != GatewayFailureScopeAccount {
+		return
+	}
+	body, _ := s.readUpstreamErrorBody(resp)
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	s.rateLimitService.HandleUpstreamError(ctx, account, http.StatusUnauthorized, resp.Header, body)
+}
+
 func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, resp *http.Response, account *Account) {
 	body, _ := s.readUpstreamErrorBody(resp)
 	statusCode := resp.StatusCode
 
-	// OAuth/Setup Token 账号的 403：标记账号异常
-	if account.IsOAuth() && statusCode == 403 {
+	// OAuth/Setup Token 账号的 403：标记账号异常。
+	if s.rateLimitService != nil && account.IsOAuth() && statusCode == http.StatusForbidden {
 		s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body)
 		logger.LegacyPrintf("service.gateway", "Account %d: marked as error after retry exhaustion for status %d", account.ID, statusCode)
-	} else {
-		// API Key 未配置错误码：不标记账号状态
-		logger.LegacyPrintf("service.gateway", "Account %d: upstream error %d after retry exhaustion (not marking account)", account.ID, statusCode)
+		return
 	}
+	// Anthropic API Key 的 429 在同凭据重试耗尽后也必须持久化限流状态，
+	// 由 RateLimitService 统一解析 Retry-After/reset 头或应用集中配置的兜底冷却。
+	if s.rateLimitService != nil && account.Platform == PlatformAnthropic && account.Type == AccountTypeAPIKey && statusCode == http.StatusTooManyRequests {
+		s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body)
+		logger.LegacyPrintf("service.gateway", "Account %d: persisted Anthropic API key cooldown after retry exhaustion", account.ID)
+		return
+	}
+	// API Key 未配置错误码：不标记账号状态
+	logger.LegacyPrintf("service.gateway", "Account %d: upstream error %d after retry exhaustion (not marking account)", account.ID, statusCode)
 }
 
 func (s *GatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account, requestedModel ...string) {

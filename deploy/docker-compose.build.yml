@@ -1,28 +1,41 @@
 # =============================================================================
-# Sub2API Docker Compose - 源码构建叠加层 (二开专用)
+# Sub2API Docker Compose - auditable source-build overlay
 # =============================================================================
-# 作用：让 docker compose 用【本仓库源码】构建镜像，覆盖官方预构建镜像
-#       weishaw/sub2api:latest —— 否则你的二开改动不会生效。
+# This overlay always builds the application service from this repository root.
+# Do not run it alone: use deploy/build_image.sh so Git provenance variables are
+# populated and the resulting image receives an immutable commit-based tag.
 #
-# 与 docker-compose.local.yml 叠加使用（-f 顺序：先 base 后本文件）：
+# Build only:
+#   ./build_image.sh build
+# Deploy the freshly built source image:
+#   ./build_image.sh deploy
+# Roll back to an image retained on the host:
+#   ./build_image.sh rollback git-<previous-12-char-commit>
 #
-#   cd deploy
+# Equivalent explicit Compose invocation (all variables are required):
 #   docker compose -f docker-compose.local.yml -f docker-compose.build.yml up -d --build
-#
-# 之后升级（改了代码后重建）：
-#   docker compose -f docker-compose.local.yml -f docker-compose.build.yml up -d --build
-#
-# 说明：
-# - context: .. 指向仓库根目录（Dockerfile 需要 backend/ frontend/ docs/legal/ 等）。
-# - GOPROXY/GOSUMDB 用国内镜像加速 Go 依赖拉取；海外服务器可删掉这两行走默认。
 # =============================================================================
 
 services:
   sub2api:
-    image: sub2api:local
+    # Replaces weishaw/sub2api:latest from the base file with an immutable local
+    # source-build reference. build_image.sh defaults the tag to git-<commit>.
+    image: "${SUB2API_IMAGE_REPOSITORY:-sub2api-source}:${SUB2API_IMAGE_TAG:?run ./build_image.sh to set a commit-based image tag}"
+    pull_policy: never
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        GOPROXY: https://goproxy.cn,direct
-        GOSUMDB: sum.golang.google.cn
+        VERSION: "${SUB2API_BUILD_VERSION:?run ./build_image.sh to set VERSION}"
+        COMMIT: "${SUB2API_BUILD_COMMIT:?run ./build_image.sh to set COMMIT}"
+        DATE: "${SUB2API_BUILD_DATE:?run ./build_image.sh to set UTC DATE}"
+        GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
+        GOSUMDB: "${GOSUMDB:-sum.golang.google.cn}"
+      labels:
+        org.opencontainers.image.version: "${SUB2API_BUILD_VERSION}"
+        org.opencontainers.image.revision: "${SUB2API_BUILD_COMMIT}"
+        org.opencontainers.image.created: "${SUB2API_BUILD_DATE}"
+        io.sub2api.source.dirty: "${SUB2API_BUILD_DIRTY:-false}"
+    labels:
+      io.sub2api.source.image: "${SUB2API_IMAGE_REPOSITORY:-sub2api-source}:${SUB2API_IMAGE_TAG}"
+      io.sub2api.source.commit: "${SUB2API_BUILD_COMMIT}"

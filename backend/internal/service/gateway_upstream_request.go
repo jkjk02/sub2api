@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -163,10 +164,11 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// OAuth + mimic Claude Code: 强制注入 CLI 指纹相关 header
 	// 非 OAuth（API Key/Bedrock）：由独立全局设置统一决定是否注入 CLI 兼容 headers
+	cliRuntime := s.claudeGatewayRuntimeConfig()
 	shouldInjectCLIHeaders := (tokenType == "oauth" && mimicClaudeCode) ||
 		(tokenType != "oauth" && mimicClaudeCode &&
-			s.legacyAPIKeyCLISimulationEnabled() &&
-			s.cfg.Gateway.CliSimulation.EnableCCMimicHeadersForAPIKey)
+			cliRuntime.LegacySynthesisEnabled() &&
+			cliRuntime.EnableCCMimicHeadersForAPIKey)
 	if shouldInjectCLIHeaders {
 		applyClaudeCodeMimicHeaders(req, reqStream)
 		// Explicit account values win; missing values come from a stable account-indexed pool.
@@ -529,8 +531,9 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 	if clientBeta != "" {
 		return stripBetaTokensWithSet(clientBeta, effectiveDropSet), true
 	}
-	if mimicClaudeCode && s.legacyAPIKeyCLISimulationEnabled() &&
-		s.cfg.Gateway.CliSimulation.ForceCLIBetaForAPIKey {
+	cliRuntime := s.claudeGatewayRuntimeConfig()
+	if mimicClaudeCode && cliRuntime.LegacySynthesisEnabled() &&
+		cliRuntime.ForceCLIBetaForAPIKey {
 		header := claude.APIKeyBetaHeader
 		if strings.Contains(strings.ToLower(modelID), "haiku") {
 			header = claude.APIKeyHaikuBetaHeader
@@ -550,18 +553,19 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 
 // mergeExtraBetaTokens 合并配置文件 gateway.cli_simulation.extra_beta_tokens 中的额外 beta token
 func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
-	if !s.legacyCLIProtocolEnabled() || len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens) == 0 {
+	cliRuntime := s.claudeGatewayRuntimeConfig()
+	if cliRuntime.EffectiveProtocolMode() != config.CliSimulationProtocolModeLegacy || len(cliRuntime.ExtraBetaTokens) == 0 {
 		return base
 	}
-	seen := make(map[string]struct{}, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
-	result := make([]string, 0, len(base)+len(s.cfg.Gateway.CliSimulation.ExtraBetaTokens))
+	seen := make(map[string]struct{}, len(base)+len(cliRuntime.ExtraBetaTokens))
+	result := make([]string, 0, len(base)+len(cliRuntime.ExtraBetaTokens))
 	for _, token := range base {
 		if _, ok := seen[token]; !ok {
 			seen[token] = struct{}{}
 			result = append(result, token)
 		}
 	}
-	for _, token := range s.cfg.Gateway.CliSimulation.ExtraBetaTokens {
+	for _, token := range cliRuntime.ExtraBetaTokens {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			continue
@@ -576,8 +580,9 @@ func (s *GatewayService) mergeExtraBetaTokens(base []string) []string {
 
 // getEffectiveCacheControlTTL returns the configured cache_control TTL override.
 func (s *GatewayService) getEffectiveCacheControlTTL() string {
-	if s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.CacheControlTTLOverride != "" {
-		return s.cfg.Gateway.CliSimulation.CacheControlTTLOverride
+	cliRuntime := s.claudeGatewayRuntimeConfig()
+	if cliRuntime.EffectiveProtocolMode() == config.CliSimulationProtocolModeLegacy && cliRuntime.CacheControlTTLOverride != "" {
+		return cliRuntime.CacheControlTTLOverride
 	}
 	return claude.DefaultCacheControlTTL
 }

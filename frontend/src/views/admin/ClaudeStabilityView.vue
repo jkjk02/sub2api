@@ -14,10 +14,10 @@
             </p>
           </div>
           <div class="flex flex-wrap gap-3">
-            <button type="button" class="btn btn-secondary" :disabled="loading || saving" @click="resetRecommended">
+            <button type="button" class="btn btn-secondary" :disabled="loading || saving || !hasLoaded" @click="resetRecommended">
               恢复推荐值
             </button>
-            <button type="button" class="btn btn-primary" :disabled="loading || saving" @click="save">
+            <button type="button" class="btn btn-primary" :disabled="loading || saving || !hasLoaded" @click="save">
               {{ saving ? "保存中..." : "保存并立即生效" }}
             </button>
           </div>
@@ -28,7 +28,17 @@
         <div class="h-8 w-8 animate-spin rounded-full border-b-2 border-primary-600"></div>
       </div>
 
-      <template v-else>
+      <div v-else-if="loadError" data-testid="claude-stability-load-error" role="alert" class="card flex min-h-48 flex-col items-center justify-center gap-4 px-6 py-10 text-center">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Claude 稳定性设置加载失败</h2>
+          <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ loadError }}</p>
+        </div>
+        <button type="button" class="btn btn-primary" :disabled="loading || saving" @click="load">
+          重试加载
+        </button>
+      </div>
+
+      <template v-else-if="hasLoaded">
         <section class="card">
           <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -129,7 +139,7 @@
 
         <div class="flex justify-end gap-3 pb-8">
           <button type="button" class="btn btn-secondary" :disabled="saving" @click="load">重新加载</button>
-          <button type="button" class="btn btn-primary" :disabled="saving" @click="save">
+          <button type="button" class="btn btn-primary" :disabled="loading || saving || !hasLoaded" @click="save">
             {{ saving ? "保存中..." : "保存并立即生效" }}
           </button>
         </div>
@@ -150,6 +160,8 @@ import { extractApiErrorMessage } from "@/utils/apiError";
 const appStore = useAppStore();
 const loading = ref(true);
 const saving = ref(false);
+const hasLoaded = ref(false);
+const loadError = ref("");
 const versionPoolDraft = ref("");
 const betaTokensDraft = ref("");
 
@@ -182,7 +194,13 @@ const recommendedDefaults = (): ClaudeGatewaySettings => ({
   system_prompt_static_override: "",
 });
 
+type HiddenClaudeGatewaySettings = Pick<
+  ClaudeGatewaySettings,
+  "os_arch_pool" | "cache_control_ttl_override" | "fingerprint_salt_override" | "system_prompt_static_override"
+>;
+
 const form = reactive<ClaudeGatewaySettings>(recommendedDefaults());
+const loadedHiddenSettings = ref<HiddenClaudeGatewaySettings | null>(null);
 const selectedModeClass = "border-emerald-400 bg-emerald-50 ring-1 ring-emerald-300 dark:border-emerald-700 dark:bg-emerald-950/20";
 const warningModeClass = "border-amber-400 bg-amber-50 ring-1 ring-amber-300 dark:border-amber-700 dark:bg-amber-950/20";
 const normalModeClass = "border-gray-200 bg-white hover:border-gray-300 dark:border-dark-700 dark:bg-dark-800";
@@ -247,32 +265,52 @@ function syncDrafts(): void {
   betaTokensDraft.value = (form.extra_beta_tokens || []).join("\n");
 }
 
+function getHiddenSettings(settings: HiddenClaudeGatewaySettings): HiddenClaudeGatewaySettings {
+  return {
+    os_arch_pool: settings.os_arch_pool.map((entry) => ({ ...entry })),
+    cache_control_ttl_override: settings.cache_control_ttl_override,
+    fingerprint_salt_override: settings.fingerprint_salt_override,
+    system_prompt_static_override: settings.system_prompt_static_override,
+  };
+}
+
 function resetRecommended(): void {
-  Object.assign(form, recommendedDefaults());
+  if (!hasLoaded.value || !loadedHiddenSettings.value) return;
+
+  Object.assign(form, recommendedDefaults(), getHiddenSettings(loadedHiddenSettings.value));
   syncDrafts();
   appStore.showSuccess("已恢复推荐值，点击保存后生效");
 }
 
 async function load(): Promise<void> {
   loading.value = true;
+  hasLoaded.value = false;
+  loadError.value = "";
   try {
     const settings = await adminAPI.settings.getClaudeGatewaySettings();
     Object.assign(form, recommendedDefaults(), settings);
+    loadedHiddenSettings.value = getHiddenSettings(settings);
     syncDrafts();
+    hasLoaded.value = true;
   } catch (error: unknown) {
-    appStore.showError(extractApiErrorMessage(error, "加载 Claude 稳定性设置失败"));
+    const message = extractApiErrorMessage(error, "加载 Claude 稳定性设置失败");
+    loadError.value = message;
+    appStore.showError(message);
   } finally {
     loading.value = false;
   }
 }
 
 async function save(): Promise<void> {
+  if (!hasLoaded.value || loading.value || saving.value) return;
+
   saving.value = true;
   try {
     form.cc_version_pool = splitLines(versionPoolDraft.value);
     form.extra_beta_tokens = splitLines(betaTokensDraft.value);
     const updated = await adminAPI.settings.updateClaudeGatewaySettings({ ...form });
     Object.assign(form, updated);
+    loadedHiddenSettings.value = getHiddenSettings(updated);
     syncDrafts();
     appStore.showSuccess("Claude 稳定性设置已保存并立即生效");
   } catch (error: unknown) {
