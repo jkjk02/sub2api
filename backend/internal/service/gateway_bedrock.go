@@ -184,8 +184,16 @@ func (s *GatewayService) executeBedrockUpstream(
 ) (*http.Response, error) {
 	var resp *http.Response
 	var err error
+	retryPolicy := s.gatewayRetryPolicy()
+	maxRetryAttempts := retryPolicy.maxAttempts
+	maxRetryElapsed := retryPolicy.maxElapsed
 	retryStart := time.Now()
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+		if attempt == 1 {
+			if err := s.applyInterRequestDelay(ctx, account.ID); err != nil {
+				return nil, err
+			}
+		}
 		var upstreamReq *http.Request
 		if account.IsBedrockAPIKey() {
 			upstreamReq, err = s.buildUpstreamRequestBedrockAPIKey(ctx, body, modelID, region, stream, apiKey)
@@ -229,7 +237,7 @@ func (s *GatewayService) executeBedrockUpstream(
 					break
 				}
 
-				delay := retryBackoffDelay(attempt)
+				delay := s.retryBackoffDelay(attempt, resp, retryPolicy)
 				remaining := maxRetryElapsed - elapsed
 				if delay > remaining {
 					delay = remaining

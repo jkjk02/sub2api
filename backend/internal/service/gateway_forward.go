@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	mathrand "math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
 
 	"github.com/gin-gonic/gin"
@@ -33,14 +35,73 @@ const (
 	maxRetryElapsed = 10 * time.Second
 )
 
-func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode int) bool {
-	// OAuth/Setup Token 账号：仅 403 重试
-	if account.IsOAuth() {
-		return statusCode == 403
-	}
+type gatewayRetryPolicy struct {
+	maxAttempts int
+	baseDelay   time.Duration
+	maxDelay    time.Duration
+	maxElapsed  time.Duration
+	jitter      bool
+	retryAfter  bool
+}
 
-	// API Key 账号：未配置的错误码重试
+func (s *GatewayService) gatewayRetryPolicy() gatewayRetryPolicy {
+	policy := gatewayRetryPolicy{
+		maxAttempts: maxRetryAttempts,
+		baseDelay:   retryBaseDelay,
+		maxDelay:    retryMaxDelay,
+		maxElapsed:  maxRetryElapsed,
+	}
+	if s == nil || s.cfg == nil {
+		return policy
+	}
+	s.ensureCLISimulationSettingsLoaded()
+	c := s.cfg.Gateway.CliSimulation
+	if !c.StabilityProtectionEnabled {
+		return policy
+	}
+	if c.MaxRetryAttempts > 0 {
+		policy.maxAttempts = c.MaxRetryAttempts
+	}
+	if c.RetryBaseDelayMs > 0 {
+		policy.baseDelay = time.Duration(c.RetryBaseDelayMs) * time.Millisecond
+	}
+	if c.RetryMaxDelayMs > 0 {
+		policy.maxDelay = time.Duration(c.RetryMaxDelayMs) * time.Millisecond
+	}
+	if policy.maxDelay < policy.baseDelay {
+		policy.maxDelay = policy.baseDelay
+	}
+	if c.RetryMaxElapsedSeconds > 0 {
+		policy.maxElapsed = time.Duration(c.RetryMaxElapsedSeconds) * time.Second
+	}
+	policy.jitter = c.RetryJitterEnabled
+	policy.retryAfter = c.RespectRetryAfter
+	return policy
+}
+
+func (s *GatewayService) shouldRetryUpstreamError(account *Account, statusCode int) bool {
+	if account == nil || account.IsOAuth() || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return false
+	}
+	if s != nil && s.cfg != nil {
+		s.ensureCLISimulationSettingsLoaded()
+		if s.cfg.Gateway.CliSimulation.StabilityProtectionEnabled {
+			switch statusCode {
+			case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+				return true
+			default:
+				return statusCode >= http.StatusInternalServerError
+			}
+		}
+	}
 	return !account.ShouldHandleErrorCode(statusCode)
+}
+
+func shouldRetryFailoverOnSameAccount(account *Account, statusCode int) bool {
+	if account == nil || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return false
+	}
+	return account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode)
 }
 
 // shouldFailoverUpstreamError determines whether an upstream error should trigger account failover.
@@ -53,14 +114,25 @@ func (s *GatewayService) shouldFailoverUpstreamError(statusCode int) bool {
 	}
 }
 
-func retryBackoffDelay(attempt int) time.Duration {
-	// attempt 从 1 开始，表示第 attempt 次请求刚失败，需要等待后进行第 attempt+1 次请求。
+func (s *GatewayService) retryBackoffDelay(attempt int, resp *http.Response, policy gatewayRetryPolicy) time.Duration {
 	if attempt <= 0 {
-		return retryBaseDelay
+		attempt = 1
 	}
-	delay := retryBaseDelay * time.Duration(1<<(attempt-1))
-	if delay > retryMaxDelay {
-		return retryMaxDelay
+	delay := policy.baseDelay * time.Duration(1<<(attempt-1))
+	if delay > policy.maxDelay {
+		delay = policy.maxDelay
+	}
+	if policy.jitter && delay > time.Millisecond {
+		half := delay / 2
+		delay = half + time.Duration(mathrand.Int63n(int64(delay-half)+1))
+	}
+	if policy.retryAfter && resp != nil {
+		if resetAt := parseRetryAfterResetTime(resp.Header, time.Now()); resetAt != nil {
+			retryAfter := time.Until(*resetAt)
+			if retryAfter > delay {
+				delay = retryAfter
+			}
+		}
 	}
 	return delay
 }
@@ -188,9 +260,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
 
-	// 对于开启了 cli_mode 的非 OAuth 账号（API Key），允许注入 CLI 特征 headers，
-	// 但不执行 OAuth 特定的 body 改写（system prompt 注入、metadata 注入等）。
-	shouldSimulateCLIForAPIKey := account.IsCliMode() && s.legacyAPIKeyCLISimulationEnabled()
+	// 非 OAuth（API Key/Bedrock）账号由独立的全局设置统一控制，
+	// 不再要求账号 extra.cli_mode；仍不执行 OAuth 特定的 body 改写。
+	shouldSimulateCLIForAPIKey := account.IsAPIKeyOrBedrock() && s.legacyAPIKeyCLISimulationEnabled()
 
 	if shouldMimicClaudeCode {
 		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
@@ -327,12 +399,14 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		}
 	}
 
-	// 解析 TLS 指纹 profile（同一请求生命周期内不变，避免重试循环中重复解析）
-	tlsProfile := s.tlsFPProfileService.ResolveTLSProfile(account)
-	if s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.TLSProfilePoolSize > 1 && account != nil && account.IsCliMode() {
-		if profile := s.tlsFPProfileService.ResolveTLSProfileForAccount(account, s.cfg.Gateway.CliSimulation.TLSProfilePoolSize); profile != nil {
-			tlsProfile = profile
-		}
+	// TLS profile 由独立的 Claude 网关设置统一控制；账号登录/编辑页中的历史字段不再生效。
+	var tlsProfile *tlsfingerprint.Profile
+	if account != nil && account.Platform == PlatformAnthropic && s.legacyCLIProtocolEnabled() && s.cfg.Gateway.CliSimulation.EnableTLSFingerprint {
+		tlsProfile = s.tlsFPProfileService.ResolveGlobalTLSProfile(
+			account.ID,
+			s.cfg.Gateway.CliSimulation.TLSFingerprintProfileID,
+			s.cfg.Gateway.CliSimulation.TLSProfilePoolSize,
+		)
 	}
 
 	// 调试日志：记录即将转发的账号信息
@@ -355,7 +429,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// causing upstream to reject the request with 400 "thinking.signature: Field required".
 	// FilterThinkingBlocks removes only the invalid blocks; thinking blocks with valid signatures
 	// are preserved. This avoids relying solely on the post-error retry path, which can time out
-	// (maxRetryElapsed = 10s) for long conversations before the retry budget is exhausted.
+	// for long conversations before the configured retry budget is exhausted.
 	//
 	// 仅 anthropic-strict 模型族执行此过滤；passback-required 上游 (DeepSeek/Kimi/GLM 等)
 	// 要求历史 thinking block 原样回传，过滤反而制造 400。reqModel 此时已是映射后的模型 ID。
@@ -376,6 +450,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// 重试循环
 	var resp *http.Response
 	lastWireBody := body
+	retryPolicy := s.gatewayRetryPolicy()
+	maxRetryAttempts := retryPolicy.maxAttempts
+	maxRetryElapsed := retryPolicy.maxElapsed
 	retryStart := time.Now()
 	authRecoveryAttempted := false
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
@@ -389,9 +466,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
 		lastWireBody = wireBody
 
-		// 请求间延迟：模拟真人打字节奏，降低自动化检测风险（仅首次尝试，重试跳过）。
-		if attempt == 1 && (shouldMimicClaudeCode || shouldSimulateCLIForAPIKey) {
-			if err := s.applyInterRequestDelay(ctx); err != nil {
+		// 稳定性节流仅在首次尝试执行，重试由指数退避控制。
+		if attempt == 1 && account.Platform == PlatformAnthropic {
+			if err := s.applyInterRequestDelay(ctx, account.ID); err != nil {
 				return nil, err
 			}
 		}
@@ -687,7 +764,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 					break
 				}
 
-				delay := retryBackoffDelay(attempt)
+				delay := s.retryBackoffDelay(attempt, resp, retryPolicy)
 				remaining := maxRetryElapsed - elapsed
 				if delay > remaining {
 					delay = remaining
@@ -770,7 +847,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
-				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				RetryableOnSameAccount: shouldRetryFailoverOnSameAccount(account, resp.StatusCode),
 			}
 		}
 		return s.handleRetryExhaustedError(ctx, resp, c, account)
@@ -804,7 +881,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           respBody,
-			RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+			RetryableOnSameAccount: shouldRetryFailoverOnSameAccount(account, resp.StatusCode),
 		}
 	}
 	if resp.StatusCode >= 400 {

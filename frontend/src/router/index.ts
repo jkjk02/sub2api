@@ -573,6 +573,17 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/claude-stability',
+    name: 'AdminClaudeStability',
+    component: () => import('@/views/admin/ClaudeStabilityView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Claude Stability',
+      description: 'Anthropic retry, pacing, cooldown, and compatibility controls'
+    }
+  },
+  {
     path: '/admin/settings',
     name: 'AdminSettings',
     component: () => import('@/views/admin/SettingsView.vue'),

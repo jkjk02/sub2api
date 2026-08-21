@@ -92,6 +92,21 @@ func NewRateLimitService(accountRepo AccountRepository, usageRepo UsageLogReposi
 	}
 }
 
+func (s *RateLimitService) claudeStabilityConfig(ctx context.Context) config.CliSimulationConfig {
+	if s != nil && s.settingService != nil {
+		_, _ = s.settingService.GetClaudeGatewaySettings(ctx)
+	}
+	if s != nil && s.cfg != nil {
+		return s.cfg.Gateway.CliSimulation
+	}
+	return config.CliSimulationConfig{
+		StabilityProtectionEnabled:       true,
+		RespectRetryAfter:                true,
+		RateLimitFallbackCooldownSeconds: 30,
+		OAuthAuthCooldownMinutes:         30,
+	}
+}
+
 // SetTimeoutCounterCache 设置超时计数器缓存（可选依赖）
 func (s *RateLimitService) SetTimeoutCounterCache(cache TimeoutCounterCache) {
 	s.timeoutCounterCache = cache
@@ -416,9 +431,15 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 					slog.Info("antigravity_401_force_refresh_marked", "account_id", authAccount.ID)
 				}
 			}
-			cooldownMinutes := s.cfg.RateLimit.OAuth401CooldownMinutes
-			if cooldownMinutes <= 0 {
-				cooldownMinutes = 10
+			cooldownMinutes := 10
+			if s.cfg != nil && s.cfg.RateLimit.OAuth401CooldownMinutes > 0 {
+				cooldownMinutes = s.cfg.RateLimit.OAuth401CooldownMinutes
+			}
+			if authAccount.Platform == PlatformAnthropic {
+				stability := s.claudeStabilityConfig(ctx)
+				if stability.StabilityProtectionEnabled && stability.OAuthAuthCooldownMinutes > 0 {
+					cooldownMinutes = stability.OAuthAuthCooldownMinutes
+				}
 			}
 			until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
 			s.notifyAccountSchedulingBlocked(authAccount, until, "oauth_401")
@@ -1099,6 +1120,23 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		return
 	}
 
+	// Retry-After is the authoritative short-window signal when no Anthropic window header is present.
+	if account.Platform == PlatformAnthropic {
+		stability := s.claudeStabilityConfig(ctx)
+		if stability.StabilityProtectionEnabled && stability.RespectRetryAfter {
+			now := time.Now()
+			if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
+				s.notifyAccountSchedulingBlocked(account, *resetAt, "429_retry_after")
+				if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+					return
+				}
+				slog.Info("anthropic_retry_after_applied", "account_id", account.ID, "reset_at", *resetAt, "reset_in", time.Until(*resetAt).Truncate(time.Second))
+				return
+			}
+		}
+	}
+
 	// 3. 尝试从响应头解析重置时间（Anthropic 聚合头，向后兼容）
 	resetTimestamp := headers.Get("anthropic-ratelimit-unified-reset")
 
@@ -1192,6 +1230,13 @@ func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, accoun
 }
 
 func (s *RateLimitService) get429FallbackCooldown(ctx context.Context, account *Account) (time.Duration, bool) {
+	if account != nil && account.Platform == PlatformAnthropic {
+		stability := s.claudeStabilityConfig(ctx)
+		if stability.StabilityProtectionEnabled && stability.RateLimitFallbackCooldownSeconds > 0 {
+			seconds := clampRateLimit429CooldownSeconds(stability.RateLimitFallbackCooldownSeconds)
+			return time.Duration(seconds) * time.Second, true
+		}
+	}
 	if s.settingService != nil {
 		settings, err := s.settingService.GetRateLimit429CooldownSettings(ctx)
 		if err == nil && settings != nil {

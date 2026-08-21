@@ -18,6 +18,8 @@ import (
 func newCLIProtocolTestService(mode string) *GatewayService {
 	return &GatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
 		CliSimulation: config.CliSimulationConfig{
+			StabilityProtectionEnabled:    true,
+			TrafficSmoothingEnabled:       true,
 			ProtocolMode:                  mode,
 			Enabled:                       true,
 			ForceCLIBetaForAPIKey:         true,
@@ -57,7 +59,6 @@ func TestGatewayServiceCLIProtocolModeGatesAPIKeyHeadersAndBeta(t *testing.T) {
 				ID:       17,
 				Platform: PlatformAnthropic,
 				Type:     AccountTypeAPIKey,
-				Extra:    map[string]any{"cli_mode": true},
 			}
 			svc := newCLIProtocolTestService(tt.mode)
 
@@ -93,7 +94,7 @@ func TestGatewayServiceInterRequestDelayHonorsCancellation(t *testing.T) {
 	cancel()
 
 	started := time.Now()
-	err := svc.applyInterRequestDelay(ctx)
+	err := svc.applyInterRequestDelay(ctx, 17)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Less(t, time.Since(started), 250*time.Millisecond)
 }
@@ -101,7 +102,7 @@ func TestGatewayServiceInterRequestDelayHonorsCancellation(t *testing.T) {
 func TestGatewayServiceInterRequestDelaySkippedInPassthrough(t *testing.T) {
 	svc := newCLIProtocolTestService(config.CliSimulationProtocolModePassthrough)
 	started := time.Now()
-	require.NoError(t, svc.applyInterRequestDelay(context.Background()))
+	require.NoError(t, svc.applyInterRequestDelay(context.Background(), 17))
 	require.Less(t, time.Since(started), 250*time.Millisecond)
 }
 

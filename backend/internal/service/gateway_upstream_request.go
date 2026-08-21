@@ -162,7 +162,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// OAuth + mimic Claude Code: 强制注入 CLI 指纹相关 header
-	// 非 OAuth (API Key) + cli_mode: 若配置允许则也注入 CLI 特征 headers
+	// 非 OAuth（API Key/Bedrock）：由独立全局设置统一决定是否注入 CLI 兼容 headers
 	shouldInjectCLIHeaders := (tokenType == "oauth" && mimicClaudeCode) ||
 		(tokenType != "oauth" && mimicClaudeCode &&
 			s.legacyAPIKeyCLISimulationEnabled() &&

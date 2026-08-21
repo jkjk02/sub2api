@@ -1,6 +1,10 @@
 package service
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+)
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
@@ -671,5 +675,57 @@ type OpenAIFastPolicySettings struct {
 func DefaultOpenAIFastPolicySettings() *OpenAIFastPolicySettings {
 	return &OpenAIFastPolicySettings{
 		Rules: []OpenAIFastPolicyRule{},
+	}
+}
+
+// ClaudeGatewaySettings is the centralized Anthropic API-key compatibility profile.
+// It replaces the historical per-account cli_mode switch. Passthrough is the safe default.
+type ClaudeGatewaySettings struct {
+	StabilityProtectionEnabled       bool                 `json:"stability_protection_enabled"`
+	RespectRetryAfter                bool                 `json:"respect_retry_after"`
+	RetryJitterEnabled               bool                 `json:"retry_jitter_enabled"`
+	TrafficSmoothingEnabled          bool                 `json:"traffic_smoothing_enabled"`
+	MaxRetryAttempts                 int                  `json:"max_retry_attempts"`
+	RetryBaseDelayMs                 int                  `json:"retry_base_delay_ms"`
+	RetryMaxDelayMs                  int                  `json:"retry_max_delay_ms"`
+	RetryMaxElapsedSeconds           int                  `json:"retry_max_elapsed_seconds"`
+	RateLimitFallbackCooldownSeconds int                  `json:"rate_limit_fallback_cooldown_seconds"`
+	OAuthAuthCooldownMinutes         int                  `json:"oauth_auth_cooldown_minutes"`
+	ProtocolMode                     string               `json:"protocol_mode"`
+	Enabled                          bool                 `json:"enabled"`
+	ForceCLIBetaForAPIKey            bool                 `json:"force_cli_beta_for_apikey"`
+	EnableCCMimicHeadersForAPIKey    bool                 `json:"enable_cc_mimic_headers_for_apikey"`
+	CCVersionOverride                string               `json:"cc_version_override"`
+	CCVersionPool                    []string             `json:"cc_version_pool"`
+	OSArchPool                       []config.OSArchEntry `json:"os_arch_pool"`
+	ExtraBetaTokens                  []string             `json:"extra_beta_tokens"`
+	CacheControlTTLOverride          string               `json:"cache_control_ttl_override"`
+	FingerprintSaltOverride          string               `json:"fingerprint_salt_override"`
+	EnableTLSFingerprint             bool                 `json:"enable_tls_fingerprint"`
+	TLSFingerprintProfileID          int64                `json:"tls_fingerprint_profile_id"`
+	TLSProfilePoolSize               int                  `json:"tls_profile_pool_size"`
+	MinInterRequestDelayMs           int                  `json:"min_inter_request_delay_ms"`
+	MaxInterRequestDelayMs           int                  `json:"max_inter_request_delay_ms"`
+	SystemPromptStaticOverride       string               `json:"system_prompt_static_override"`
+}
+
+func DefaultClaudeGatewaySettings() *ClaudeGatewaySettings {
+	return &ClaudeGatewaySettings{
+		StabilityProtectionEnabled:       true,
+		RespectRetryAfter:                true,
+		RetryJitterEnabled:               true,
+		TrafficSmoothingEnabled:          true,
+		MaxRetryAttempts:                 3,
+		RetryBaseDelayMs:                 500,
+		RetryMaxDelayMs:                  5000,
+		RetryMaxElapsedSeconds:           15,
+		RateLimitFallbackCooldownSeconds: 30,
+		OAuthAuthCooldownMinutes:         30,
+		ProtocolMode:                     config.CliSimulationProtocolModePassthrough,
+		MinInterRequestDelayMs:           120,
+		MaxInterRequestDelayMs:           360,
+		CCVersionPool:                    []string{},
+		OSArchPool:                       []config.OSArchEntry{},
+		ExtraBetaTokens:                  []string{},
 	}
 }

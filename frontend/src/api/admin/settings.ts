@@ -1338,6 +1338,52 @@ export async function updatePanelRateLimitSettings(
   return data;
 }
 
+// ==================== Claude Gateway Settings ====================
+
+export interface ClaudeGatewayOSArchEntry {
+  os: string;
+  arch: string;
+}
+
+export interface ClaudeGatewaySettings {
+  stability_protection_enabled: boolean;
+  respect_retry_after: boolean;
+  retry_jitter_enabled: boolean;
+  traffic_smoothing_enabled: boolean;
+  max_retry_attempts: number;
+  retry_base_delay_ms: number;
+  retry_max_delay_ms: number;
+  retry_max_elapsed_seconds: number;
+  rate_limit_fallback_cooldown_seconds: number;
+  oauth_auth_cooldown_minutes: number;
+  protocol_mode: "passthrough" | "legacy";
+  enabled: boolean;
+  force_cli_beta_for_apikey: boolean;
+  enable_cc_mimic_headers_for_apikey: boolean;
+  cc_version_override: string;
+  cc_version_pool: string[];
+  os_arch_pool: ClaudeGatewayOSArchEntry[];
+  extra_beta_tokens: string[];
+  cache_control_ttl_override: string;
+  fingerprint_salt_override: string;
+  enable_tls_fingerprint: boolean;
+  tls_fingerprint_profile_id: number;
+  tls_profile_pool_size: number;
+  min_inter_request_delay_ms: number;
+  max_inter_request_delay_ms: number;
+  system_prompt_static_override: string;
+}
+
+export async function getClaudeGatewaySettings(): Promise<ClaudeGatewaySettings> {
+  const { data } = await apiClient.get<ClaudeGatewaySettings>("/admin/settings/claude-gateway");
+  return data;
+}
+
+export async function updateClaudeGatewaySettings(settings: ClaudeGatewaySettings): Promise<ClaudeGatewaySettings> {
+  const { data } = await apiClient.put<ClaudeGatewaySettings>("/admin/settings/claude-gateway", settings);
+  return data;
+}
+
 // ==================== Stream Timeout Settings ====================
 
 /**
@@ -1567,6 +1613,8 @@ export const settingsAPI = {
   updateRateLimit429CooldownSettings,
   getPanelRateLimitSettings,
   updatePanelRateLimitSettings,
+  getClaudeGatewaySettings,
+  updateClaudeGatewaySettings,
   getStreamTimeoutSettings,
   updateStreamTimeoutSettings,
   getRectifierSettings,

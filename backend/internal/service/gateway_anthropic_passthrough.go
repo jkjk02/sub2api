@@ -93,8 +93,16 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	}
 
 	var resp *http.Response
+	retryPolicy := s.gatewayRetryPolicy()
+	maxRetryAttempts := retryPolicy.maxAttempts
+	maxRetryElapsed := retryPolicy.maxElapsed
 	retryStart := time.Now()
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+		if attempt == 1 {
+			if err := s.applyInterRequestDelay(ctx, account.ID); err != nil {
+				return nil, err
+			}
+		}
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, input.RequestStream)
 		upstreamReq, wireBody, err := s.buildUpstreamRequestAnthropicAPIKeyPassthrough(upstreamCtx, c, account, input.Body, token)
 		releaseUpstreamCtx()
@@ -147,7 +155,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 					break
 				}
 
-				delay := retryBackoffDelay(attempt)
+				delay := s.retryBackoffDelay(attempt, resp, retryPolicy)
 				remaining := maxRetryElapsed - elapsed
 				if delay > remaining {
 					delay = remaining

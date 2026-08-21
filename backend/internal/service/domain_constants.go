@@ -553,6 +553,9 @@ const (
 	// anthropic-beta header.
 	SettingKeyOpenAIFastPolicySettings = "openai_fast_policy_settings"
 
+	// SettingKeyClaudeGatewaySettings stores the centralized Anthropic API-key compatibility profile.
+	SettingKeyClaudeGatewaySettings = "claude_gateway_settings"
+
 	// =========================
 	// Claude Code Version Check
 	// =========================

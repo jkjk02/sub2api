@@ -79,6 +79,7 @@ export default {
       seconds: '{n} seconds',
     },
     view: 'View',
+    claudeStability: 'Claude Stability',
     settings: 'Settings',
     chooseFile: 'Choose File',
     upload: 'Upload',

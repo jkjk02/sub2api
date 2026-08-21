@@ -1045,8 +1045,25 @@ const (
 // 用于允许 API Key 等非 OAuth 账号在上游转发时注入 Claude Code CLI 特征
 // (User-Agent, x-stainless-*, x-app, anthropic-beta 等)，与已有 OAuth mimicry 对齐。
 type CliSimulationConfig struct {
+	// StabilityProtectionEnabled enables conservative retry, cooldown, and pacing defaults.
+	StabilityProtectionEnabled bool `mapstructure:"stability_protection_enabled"`
+	// RespectRetryAfter honors upstream Retry-After before reusing an account.
+	RespectRetryAfter bool `mapstructure:"respect_retry_after"`
+	// RetryJitterEnabled adds jitter to exponential backoff to avoid synchronized retry bursts.
+	RetryJitterEnabled bool `mapstructure:"retry_jitter_enabled"`
+	// TrafficSmoothingEnabled serializes short bursts per account using the configured pacing window.
+	TrafficSmoothingEnabled bool `mapstructure:"traffic_smoothing_enabled"`
+	// Retry policy bounds for transient upstream failures.
+	MaxRetryAttempts       int `mapstructure:"max_retry_attempts"`
+	RetryBaseDelayMs       int `mapstructure:"retry_base_delay_ms"`
+	RetryMaxDelayMs        int `mapstructure:"retry_max_delay_ms"`
+	RetryMaxElapsedSeconds int `mapstructure:"retry_max_elapsed_seconds"`
+	// Anthropic fallback cooldowns used when the upstream does not provide a reset timestamp.
+	RateLimitFallbackCooldownSeconds int `mapstructure:"rate_limit_fallback_cooldown_seconds"`
+	OAuthAuthCooldownMinutes         int `mapstructure:"oauth_auth_cooldown_minutes"`
+
 	// ProtocolMode controls whether fork-specific protocol synthesis is active.
-	// Empty and unknown values intentionally fall back to legacy for staged compatibility.
+	// Empty and unknown values fall back to passthrough so unconfigured deployments do not mutate requests.
 	ProtocolMode string `mapstructure:"protocol_mode"`
 	// Enabled: 全局开关，控制是否允许非 OAuth 账号启用 CLI 模拟
 	Enabled bool `mapstructure:"enabled"`
@@ -1063,7 +1080,11 @@ type CliSimulationConfig struct {
 	CacheControlTTLOverride string `mapstructure:"cache_control_ttl_override"`
 	// FingerprintSaltOverride: 覆盖 billing attribution 指纹 salt (空则使用内置默认值)
 	FingerprintSaltOverride string `mapstructure:"fingerprint_salt_override"`
-	// TLSProfilePoolSize: TLS 指纹 profile 池大小，>1 时启用随机选择（对 cli_mode 账户随机选取 TLS profile）
+	// EnableTLSFingerprint: 由全局设置统一控制 Anthropic 上游是否使用自定义 TLS profile。
+	EnableTLSFingerprint bool `mapstructure:"enable_tls_fingerprint"`
+	// TLSFingerprintProfileID: 0 使用内置默认；>0 使用指定模板。
+	TLSFingerprintProfileID int64 `mapstructure:"tls_fingerprint_profile_id"`
+	// TLSProfilePoolSize: TLS 指纹 profile 池大小，>1 时按 account.ID 稳定分配。
 	TLSProfilePoolSize int `mapstructure:"tls_profile_pool_size"`
 	// MinInterRequestDelayMs: 模拟真人打字节奏的最小请求间延迟（毫秒），0 表示不启用
 	MinInterRequestDelayMs int `mapstructure:"min_inter_request_delay_ms"`
@@ -1077,22 +1098,20 @@ type CliSimulationConfig struct {
 	// SystemPromptStaticOverride: 覆盖伪装路径注入的"静态"系统提示词扩充段
 	//（{claude_code_expansion_prompt}）。为空则使用内置默认文本。
 	//
-	// 最新研究表明 Anthropic 主要通过 system 提示词的"静态部分"做内容分类来识别第三方，
-	// 且真实 Claude Code 的系统提示词长达 25K+ 字符且随版本变化。为获得最强匹配，建议
-	// 抓取你本机真实 `claude` CLI 发出的 system 静态段原文粘贴到此处（或走后台设置覆盖）。
+	// 仅用于兼容已知的内部上游格式；默认留空。不要把第三方客户端提示词作为稳定身份边界。
 	SystemPromptStaticOverride string `mapstructure:"system_prompt_static_override"`
 }
 
 // EffectiveProtocolMode returns the normalized CLI simulation protocol mode.
-// Legacy is the compatibility default so an upgrade never silently changes wire behavior.
+// Passthrough is the safe default; legacy synthesis must be selected explicitly.
 func (c CliSimulationConfig) EffectiveProtocolMode() string {
 	switch strings.ToLower(strings.TrimSpace(c.ProtocolMode)) {
 	case CliSimulationProtocolModePassthrough:
 		return CliSimulationProtocolModePassthrough
 	case CliSimulationProtocolModeLegacy:
-		fallthrough
-	default:
 		return CliSimulationProtocolModeLegacy
+	default:
+		return CliSimulationProtocolModePassthrough
 	}
 }
 
@@ -2361,6 +2380,18 @@ func setDefaults() {
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
+	viper.SetDefault("gateway.cli_simulation.stability_protection_enabled", true)
+	viper.SetDefault("gateway.cli_simulation.respect_retry_after", true)
+	viper.SetDefault("gateway.cli_simulation.retry_jitter_enabled", true)
+	viper.SetDefault("gateway.cli_simulation.traffic_smoothing_enabled", true)
+	viper.SetDefault("gateway.cli_simulation.max_retry_attempts", 3)
+	viper.SetDefault("gateway.cli_simulation.retry_base_delay_ms", 500)
+	viper.SetDefault("gateway.cli_simulation.retry_max_delay_ms", 5000)
+	viper.SetDefault("gateway.cli_simulation.retry_max_elapsed_seconds", 15)
+	viper.SetDefault("gateway.cli_simulation.rate_limit_fallback_cooldown_seconds", 30)
+	viper.SetDefault("gateway.cli_simulation.oauth_auth_cooldown_minutes", 30)
+	viper.SetDefault("gateway.cli_simulation.min_inter_request_delay_ms", 120)
+	viper.SetDefault("gateway.cli_simulation.max_inter_request_delay_ms", 360)
 	viper.SetDefault("gateway.failover_on_400", false)
 	viper.SetDefault("gateway.max_account_switches", 10)
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)

@@ -2177,7 +2177,7 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 }
 
 // IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装
-// 适用于 Anthropic OAuth/SetupToken 类型账号，以及开启 cli_mode 的 API Key 账号
+// 适用于 Anthropic OAuth/SetupToken 类型账号，以及由全局兼容设置管理的 API Key 账号
 // 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征
 func (a *Account) IsTLSFingerprintEnabled() bool {
 	// 支持 Anthropic OAuth/SetupToken 账号
@@ -2192,14 +2192,7 @@ func (a *Account) IsTLSFingerprintEnabled() bool {
 		}
 		return false
 	}
-	// 支持开启 cli_mode 的 API Key 账号
-	if a.IsAPIKeyOrBedrock() && a.IsCliMode() {
-		if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
-			if enabled, ok := v.(bool); ok {
-				return enabled
-			}
-		}
-	}
+	// API Key/Bedrock 账号改由 Claude 网关全局设置控制，不再读取账号 extra。
 	return false
 }
 
@@ -2228,8 +2221,8 @@ func (a *Account) GetTLSFingerprintProfileID() int64 {
 	return 0
 }
 
-// IsCliMode 检查账号是否启用 CLI 模拟模式
-// 对于非 OAuth 账号（如 API Key），启用后将在上游转发时注入 Claude Code CLI 特征
+// IsCliMode 保留用于读取历史数据。新版本的 CLI 兼容策略由系统设置统一控制，
+// 不再要求管理员在创建或登录账号时逐个选择。
 func (a *Account) IsCliMode() bool {
 	if a.Extra == nil {
 		return false

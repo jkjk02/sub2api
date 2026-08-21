@@ -220,6 +220,25 @@ func (s *TLSFingerprintProfileService) getProfileByStableIndex(accountID int64, 
 	return p.ToTLSProfile()
 }
 
+// ResolveGlobalTLSProfile resolves the centralized Claude gateway TLS profile.
+// A positive profile ID wins; otherwise a configured pool is assigned stably by account ID.
+func (s *TLSFingerprintProfileService) ResolveGlobalTLSProfile(accountID, profileID int64, poolSize int) *tlsfingerprint.Profile {
+	if s == nil {
+		return nil
+	}
+	if profileID > 0 {
+		if p := s.GetProfileByID(profileID); p != nil {
+			return p
+		}
+	}
+	if poolSize > 1 {
+		if p := s.getProfileByStableIndex(accountID, poolSize); p != nil {
+			return p
+		}
+	}
+	return &tlsfingerprint.Profile{Name: "Built-in Default (Node.js 24.x)"}
+}
+
 // ResolveTLSProfile 根据 Account 的配置解析出运行时 TLS Profile
 //
 // 逻辑：

@@ -8,36 +8,62 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
+// ensureCLISimulationSettingsLoaded lazily applies the persisted centralized profile.
+func (s *GatewayService) ensureCLISimulationSettingsLoaded() {
+	if s == nil || s.settingService == nil {
+		return
+	}
+	s.cliSimulationSettingsOnce.Do(func() {
+		_, _ = s.settingService.GetClaudeGatewaySettings(context.Background())
+	})
+}
+
 // legacyCLIProtocolEnabled centralizes the compatibility gate for fork-specific
 // Claude Code synthesis. Unknown/empty protocol modes are normalized by config.
 func (s *GatewayService) legacyCLIProtocolEnabled() bool {
+	s.ensureCLISimulationSettingsLoaded()
 	return s != nil && s.cfg != nil &&
 		s.cfg.Gateway.CliSimulation.EffectiveProtocolMode() == config.CliSimulationProtocolModeLegacy
 }
 
 // legacyAPIKeyCLISimulationEnabled additionally honors the API-key feature switch.
 func (s *GatewayService) legacyAPIKeyCLISimulationEnabled() bool {
+	s.ensureCLISimulationSettingsLoaded()
 	return s != nil && s.cfg != nil && s.cfg.Gateway.CliSimulation.LegacySynthesisEnabled()
 }
 
-// applyInterRequestDelay inserts configured jitter before the first upstream attempt.
-// It returns promptly when the request is canceled instead of keeping a worker asleep.
-func (s *GatewayService) applyInterRequestDelay(ctx context.Context) error {
-	if !s.legacyCLIProtocolEnabled() {
+// applyInterRequestDelay smooths short request bursts per account before the first upstream attempt.
+// It is independent from legacy identity synthesis and returns promptly on cancellation.
+func (s *GatewayService) applyInterRequestDelay(ctx context.Context, accountID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.ensureCLISimulationSettingsLoaded()
+	if s == nil || s.cfg == nil {
 		return nil
 	}
-	minMs := s.cfg.Gateway.CliSimulation.MinInterRequestDelayMs
-	maxMs := s.cfg.Gateway.CliSimulation.MaxInterRequestDelayMs
+	c := s.cfg.Gateway.CliSimulation
+	if !c.StabilityProtectionEnabled || !c.TrafficSmoothingEnabled {
+		return nil
+	}
+	minMs := c.MinInterRequestDelayMs
+	maxMs := c.MaxInterRequestDelayMs
 	if minMs <= 0 || maxMs <= 0 || maxMs < minMs {
 		return nil
 	}
-	delay := time.Duration(minMs+mathrand.Intn(maxMs-minMs+1)) * time.Millisecond
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	interval := time.Duration(minMs+mathrand.Intn(maxMs-minMs+1)) * time.Millisecond
+	now := time.Now()
+
+	s.claudePacingMu.Lock()
+	if s.claudeNextRequestAt == nil {
+		s.claudeNextRequestAt = make(map[int64]time.Time)
 	}
+	scheduledAt := now
+	if next := s.claudeNextRequestAt[accountID]; next.After(scheduledAt) {
+		scheduledAt = next
+	}
+	s.claudeNextRequestAt[accountID] = scheduledAt.Add(interval)
+	s.claudePacingMu.Unlock()
+
+	return sleepWithContext(ctx, time.Until(scheduledAt))
 }

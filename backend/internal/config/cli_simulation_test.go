@@ -14,10 +14,10 @@ func TestCliSimulationConfigEffectiveProtocolMode(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "empty keeps compatibility", raw: "", want: CliSimulationProtocolModeLegacy},
+		{name: "empty defaults to passthrough", raw: "", want: CliSimulationProtocolModePassthrough},
 		{name: "legacy normalized", raw: " LEGACY ", want: CliSimulationProtocolModeLegacy},
 		{name: "passthrough normalized", raw: " PassThrough ", want: CliSimulationProtocolModePassthrough},
-		{name: "unknown keeps compatibility", raw: "future-mode", want: CliSimulationProtocolModeLegacy},
+		{name: "unknown defaults to passthrough", raw: "future-mode", want: CliSimulationProtocolModePassthrough},
 	}
 
 	for _, tt := range tests {
@@ -32,7 +32,7 @@ func TestCliSimulationConfigEffectiveProtocolMode(t *testing.T) {
 func TestCliSimulationConfigLegacySynthesisEnabled(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, (CliSimulationConfig{Enabled: true}).LegacySynthesisEnabled())
+	require.False(t, (CliSimulationConfig{Enabled: true}).LegacySynthesisEnabled())
 	require.True(t, (CliSimulationConfig{Enabled: true, ProtocolMode: "legacy"}).LegacySynthesisEnabled())
 	require.False(t, (CliSimulationConfig{Enabled: false, ProtocolMode: "legacy"}).LegacySynthesisEnabled())
 	require.False(t, (CliSimulationConfig{Enabled: true, ProtocolMode: "passthrough"}).LegacySynthesisEnabled())

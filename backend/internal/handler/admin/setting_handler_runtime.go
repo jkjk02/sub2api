@@ -507,3 +507,34 @@ func (h *SettingHandler) TestWebSearchEmulation(c *gin.Context) {
 	}
 	response.Success(c, result)
 }
+
+// GetClaudeGatewaySettings returns the centralized Anthropic API-key compatibility profile.
+// GET /api/v1/admin/settings/claude-gateway
+func (h *SettingHandler) GetClaudeGatewaySettings(c *gin.Context) {
+	settings, err := h.settingService.GetClaudeGatewaySettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, settings)
+}
+
+// UpdateClaudeGatewaySettings persists the centralized profile and applies it immediately.
+// PUT /api/v1/admin/settings/claude-gateway
+func (h *SettingHandler) UpdateClaudeGatewaySettings(c *gin.Context) {
+	var req service.ClaudeGatewaySettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if err := h.settingService.SetClaudeGatewaySettings(c.Request.Context(), &req); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	updated, err := h.settingService.GetClaudeGatewaySettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, updated)
+}

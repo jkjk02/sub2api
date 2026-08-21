@@ -270,17 +270,28 @@ gateway:
   # 注意：开启后会影响所有客户端的行为（不仅限于 VS Code / Codex CLI），请谨慎开启。
   force_codex_cli: false
 
-  # CLI simulation settings for account-specific request identity.
-  # CLI 模拟配置；仅对明确开启 cli_mode 的账号生效。
+  # CLI compatibility settings for all Anthropic API-key/Bedrock accounts.
+  # CLI 兼容配置；由系统设置统一管理，不再依赖账号 extra.cli_mode。
   cli_simulation:
+    # Conservative stability controls are enabled by default.
+    stability_protection_enabled: true
+    respect_retry_after: true
+    retry_jitter_enabled: true
+    traffic_smoothing_enabled: true
+    max_retry_attempts: 3
+    retry_base_delay_ms: 500
+    retry_max_delay_ms: 5000
+    retry_max_elapsed_seconds: 15
+    rate_limit_fallback_cooldown_seconds: 30
+    oauth_auth_cooldown_minutes: 30
     # Protocol mode: legacy preserves historical synthesis; passthrough disables fork-specific mutation.
-    # Empty/unknown values default to legacy for backward compatibility.
-    protocol_mode: "legacy"
+    # Empty/unknown values default to passthrough. Select legacy explicitly only for a known compatibility need.
+    protocol_mode: "passthrough"
     # Enable API-key CLI simulation globally (effective only in legacy mode).
     enabled: false
-    # Force the Claude Code beta set when a cli_mode API-key request has no anthropic-beta header.
+    # Force the Claude Code beta set when a globally managed API-key request has no anthropic-beta header.
     force_cli_beta_for_apikey: false
-    # Inject Claude Code User-Agent and x-stainless identity headers for cli_mode API-key accounts.
+    # Inject Claude Code User-Agent and x-stainless identity headers for globally managed API-key accounts.
     enable_cc_mimic_headers_for_apikey: false
     # Pin one Claude Code version for User-Agent and billing attribution; empty enables npm sync fallback.
     cc_version_override: ""
@@ -296,11 +307,15 @@ gateway:
     # Override generated cache-control TTL and billing fingerprint salt.
     cache_control_ttl_override: ""
     fingerprint_salt_override: ""
+    # Central TLS profile control. Keep disabled unless a known upstream integration requires it.
+    enable_tls_fingerprint: false
+    # 0 uses the built-in default; a positive value selects a saved TLS profile.
+    tls_fingerprint_profile_id: 0
     # Number of cached TLS profiles used for stable per-account selection (>1 enables it).
     tls_profile_pool_size: 0
-    # Optional request pacing jitter in milliseconds; both values must be positive.
-    min_inter_request_delay_ms: 0
-    max_inter_request_delay_ms: 0
+    # Per-account pacing window in milliseconds. Used only when traffic_smoothing_enabled is true.
+    min_inter_request_delay_ms: 120
+    max_inter_request_delay_ms: 360
     # Override the static Claude Code system-prompt expansion block; empty uses the built-in default.
     system_prompt_static_override: ""
   # Stop rewriting load-shed Codex originators to the official CLI identity.
